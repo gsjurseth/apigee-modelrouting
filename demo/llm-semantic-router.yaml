@@ -1,0 +1,240 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-semantic-router
+type: feature
+description: >
+  Semantic Model Routing feature. Before target routing occurs, invokes a fast,
+  inexpensive classifier model (`gemini-2.5-flash-lite`) via ServiceCallout to
+  classify the user prompt's intent (`SIMPLE_QA`, `CODING`, or `COMPLEX_REASONING`)
+  and dynamically rewrites `llm.model` to select the optimal downstream model
+  from the proxy's onboarded catalog:
+    - SIMPLE_QA         -> gemini-2.5-flash (Tier-1 Low-Cost Economy)
+    - CODING            -> claude-3-5-sonnet-20241022 (Tier-2 Coding Specialist + Auto-Transcoded)
+    - COMPLEX_REASONING -> gpt-4o (Tier-3 Frontier Reasoning)
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: JS-BuildClassifierRequest
+          condition: request.verb = "POST"
+        - name: AM-BuildClassifierRequest
+          condition: request.verb = "POST"
+        - name: SC-ClassifyPromptIntent
+          condition: request.verb = "POST"
+        - name: JS-SelectDownstreamModel
+          condition: request.verb = "POST"
+    - name: PostFlow
+      mode: Response
+      steps:
+        - name: JS-AttachSemanticRoutingMetadata
+          condition: request.verb = "POST"
+
+policies:
+  - name: JS-BuildClassifierRequest
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-BuildClassifierRequest
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-BuildClassifierRequest
+        ResourceURL:
+          _text: "jsc://build-classifier-request.js"
+
+  - name: AM-BuildClassifierRequest
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-BuildClassifierRequest
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: AM-BuildClassifierRequest
+        AssignTo:
+          metadata:
+            createNew: "true"
+            transport: http
+            type: request
+          _text: classifierRequest
+        Set:
+          Verb: POST
+          Headers:
+            Header:
+              - metadata:
+                  name: Content-Type
+                _text: application/json
+          Payload:
+            metadata:
+              contentType: application/json
+            _text: "{classifier_request_payload}"
+
+  - name: SC-ClassifyPromptIntent
+    type: ServiceCallout
+    content:
+      ServiceCallout:
+        metadata:
+          name: SC-ClassifyPromptIntent
+          async: "false"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: SC-ClassifyPromptIntent
+        Request:
+          metadata:
+            variable: classifierRequest
+        Response:
+          _text: classifierResponse
+        HTTPTargetConnection:
+          URL: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/classifier
+
+  - name: JS-SelectDownstreamModel
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-SelectDownstreamModel
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-SelectDownstreamModel
+        ResourceURL:
+          _text: "jsc://select-downstream-model.js"
+
+  - name: JS-AttachSemanticRoutingMetadata
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-AttachSemanticRoutingMetadata
+          timeLimit: "200"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: JS-AttachSemanticRoutingMetadata
+        ResourceURL:
+          _text: "jsc://attach-semantic-routing-metadata.js"
+
+resources:
+  - name: build-classifier-request.js
+    type: jsc
+    content: |
+      try {
+        var userPrompt = context.getVariable("llm.prompt") || "";
+        if (!userPrompt) {
+          var raw = context.getVariable("request.content");
+          if (raw) {
+            var body = JSON.parse(raw);
+            if (body.messages && body.messages.length > 0) {
+              userPrompt = body.messages[body.messages.length - 1].content || "";
+            }
+          }
+        }
+        var classifierBody = {
+          model: "gemini-2.5-flash-lite",
+          temperature: 0.0,
+          max_tokens: 16,
+          messages: [
+            {
+              role: "system",
+              content: "You are a fast semantic router classifier. Classify the user prompt into exactly one routing tier: SIMPLE_QA, CODING, or COMPLEX_REASONING."
+            },
+            {
+              role: "user",
+              content: userPrompt
+            }
+          ]
+        };
+        context.setVariable("classifier_request_payload", JSON.stringify(classifierBody));
+      } catch (e) {
+        print("Error building classifier request: " + e);
+      }
+
+  - name: select-downstream-model.js
+    type: jsc
+    content: |
+      try {
+        var rawResp = context.getVariable("classifierResponse.content");
+        var intent = "SIMPLE_QA";
+        if (rawResp) {
+          var parsed = JSON.parse(rawResp);
+          if (parsed.choices && parsed.choices.length > 0 && parsed.choices[0].message) {
+            intent = (parsed.choices[0].message.content || "SIMPLE_QA").trim().toUpperCase();
+          }
+        }
+
+        var selectedModel = "gemini-2.5-flash";
+        var costTier = "tier-1-economy ($0.075 / 1M tokens)";
+        var targetEndpoint = "gemini-target";
+
+        if (intent.indexOf("CODING") !== -1) {
+          intent = "CODING";
+          selectedModel = "claude-3-5-sonnet-20241022";
+          costTier = "tier-2-coding-specialist ($3.00 / 1M tokens)";
+          targetEndpoint = "anthropic-target";
+        } else if (intent.indexOf("COMPLEX_REASONING") !== -1 || intent.indexOf("REASONING") !== -1) {
+          intent = "COMPLEX_REASONING";
+          selectedModel = "gpt-4o";
+          costTier = "tier-3-frontier-reasoning ($10.00 / 1M tokens)";
+          targetEndpoint = "primary-target";
+        } else {
+          intent = "SIMPLE_QA";
+          selectedModel = "gemini-2.5-flash";
+          costTier = "tier-1-economy ($0.075 / 1M tokens)";
+          targetEndpoint = "gemini-target";
+        }
+
+        // Update flow variables used by Apigee RouteRules and Trace
+        context.setVariable("llm.model", selectedModel);
+        context.setVariable("llm.classifier_model", "gemini-2.5-flash-lite");
+        context.setVariable("llm.semantic_intent", intent);
+        context.setVariable("llm.selected_model", selectedModel);
+        context.setVariable("llm.cost_tier", costTier);
+        context.setVariable("llm.routed_target", targetEndpoint);
+        context.setVariable("request.header.x-semantic-routed", "true");
+
+        // Rewrite $.model in request.content so the downstream target receives the chosen model
+        var reqRaw = context.getVariable("request.content");
+        if (reqRaw) {
+          var reqBody = JSON.parse(reqRaw);
+          reqBody.model = selectedModel;
+          context.setVariable("request.content", JSON.stringify(reqBody));
+        }
+      } catch (e) {
+        print("Error selecting downstream model: " + e);
+      }
+
+  - name: attach-semantic-routing-metadata.js
+    type: jsc
+    content: |
+      try {
+        var classifierModel = context.getVariable("llm.classifier_model") || "gemini-2.5-flash-lite";
+        var intent = context.getVariable("llm.semantic_intent") || "SIMPLE_QA";
+        var selectedModel = context.getVariable("llm.selected_model") || "gemini-2.5-flash";
+        var costTier = context.getVariable("llm.cost_tier") || "tier-1-economy";
+        var targetEndpoint = context.getVariable("llm.routed_target") || "gemini-target";
+        var transcoded = (targetEndpoint === "anthropic-target");
+
+        context.setVariable("response.header.x-apigee-classifier-model", classifierModel);
+        context.setVariable("response.header.x-apigee-semantic-intent", intent);
+        context.setVariable("response.header.x-apigee-selected-model", selectedModel);
+        context.setVariable("response.header.x-apigee-cost-tier", costTier);
+
+        var respRaw = context.getVariable("response.content");
+        if (respRaw) {
+          var respBody = JSON.parse(respRaw);
+          respBody.semantic_routing = {
+            classifier_model: classifierModel,
+            detected_intent: intent,
+            selected_model: selectedModel,
+            routed_target: targetEndpoint,
+            cost_tier: costTier,
+            payload_transcoded: transcoded
+          };
+          context.setVariable("response.content", JSON.stringify(respBody));
+        }
+      } catch (e) {
+        print("Error attaching semantic routing metadata: " + e);
+      }

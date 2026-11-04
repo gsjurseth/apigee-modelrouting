@@ -1,0 +1,83 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-mistral-large-2411
+type: feature
+description: >
+  Mistral Large 2411 (`mistral/mistral-large-2411`) model target feature
+  (`api.mistral.ai`). Self-registers the `mistral` route rule
+  (`mistral-large`, `mistral-large-2411`, or `mistral-*`), configures
+  `mistral-target`, and normalizes the model identifier to `mistral-large-2411`.
+
+defaultEndpoint:
+  name: default
+  routes:
+    - name: mistral
+      condition: llm.model = "mistral-large" or llm.model = "mistral-large-2411" or llm.model StartsWith "mistral"
+      target: mistral-target
+
+targets:
+  - name: mistral-target
+    url: https://api.mistral.ai/v1/chat/completions
+    flows:
+      - name: PreFlow
+        mode: Request
+        steps:
+          - name: JS-NormalizeMistralRequest
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: AM-SetMistralHeaders
+
+policies:
+  - name: JS-NormalizeMistralRequest
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-NormalizeMistralRequest
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-NormalizeMistralRequest
+        ResourceURL:
+          _text: "jsc://normalize-mistral-request.js"
+
+  - name: AM-SetMistralHeaders
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-SetMistralHeaders
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: AM-SetMistralHeaders
+        Set:
+          Headers:
+            Header:
+              - metadata:
+                  name: x-apigee-model
+                _text: mistral-large-2411
+              - metadata:
+                  name: x-apigee-provider
+                _text: mistral
+        IgnoreUnresolvedVariables: "true"
+        AssignTo:
+          metadata:
+            createNew: "false"
+            transport: http
+            type: response
+
+resources:
+  - name: normalize-mistral-request.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("request.content");
+        if (raw) {
+          var body = JSON.parse(raw);
+          body.model = "mistral-large-2411";
+          context.setVariable("request.content", JSON.stringify(body));
+        }
+      } catch (e) {
+        print("Error normalizing Mistral request: " + e);
+      }

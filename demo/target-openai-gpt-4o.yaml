@@ -1,0 +1,56 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-openai-gpt-4o
+type: feature
+description: >
+  OpenAI GPT-4o (`openai/gpt-4o`) model target feature. Configures the primary
+  OpenAI Chat Completions TargetEndpoint (`primary-target`), normalizes the
+  model identifier to `gpt-4o`, and attaches provider/model telemetry headers
+  (`x-apigee-model: gpt-4o`, `x-apigee-provider: openai`) in PostFlow.
+
+targets:
+  - name: primary-target
+    url: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/primary
+    flows:
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: AM-SetPrimaryHeaders
+
+policies:
+  - name: AM-SetPrimaryHeaders
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-SetPrimaryHeaders
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: AM-SetPrimaryHeaders
+        Set:
+          Headers:
+            Header:
+              - metadata:
+                  name: x-apigee-model
+                _text: gpt-4o
+              - metadata:
+                  name: x-apigee-provider
+                _text: openai
+              - metadata:
+                  name: x-apigee-fallback
+                _text: "false"
+              - metadata:
+                  name: Access-Control-Allow-Origin
+                _text: "*"
+              - metadata:
+                  name: Access-Control-Allow-Methods
+                _text: "GET, POST, OPTIONS"
+              - metadata:
+                  name: Access-Control-Allow-Headers
+                _text: "*"
+        IgnoreUnresolvedVariables: "true"
+        AssignTo:
+          metadata:
+            createNew: "false"
+            transport: http
+            type: response

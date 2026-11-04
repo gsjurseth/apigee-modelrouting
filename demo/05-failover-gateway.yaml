@@ -1,0 +1,30 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: aft-demo-simple-05
+description: >
+  Stage 5 -- Resilient Enterprise AI Gateway with Semantic Cache, Model
+  Armor, Retries, and Ordered Multi-Hop Failover (compiled from Model
+  Routing config).
+features:
+  - llm-base.yaml
+  - llm-cors.yaml
+  - llm-openai-format.yaml
+  - llm-model-armor.yaml
+  - llm-semantic-cache.yaml
+  - llm-retry-and-loadbalance.yaml
+  - target-openai-gpt-4o.yaml
+  - target-vertex-ai-gemini-2.5-flash.yaml
+  - target-anthropic-claude-3-5-sonnet-20241022.yaml
+  - target-bedrock-llama-3.3-70b-instruct.yaml
+  - target-cohere-command-r-plus-08-2024.yaml
+  - target-mistral-large-2411.yaml
+  - llm-failover.yaml
+parameters:
+  - name: BASE_PATH
+    default: /v1/chat/simple-stage5
+  - name: MA_TEMPLATE_PATH
+    default: projects/apigee-product-demo/locations/us-central1/templates/enterprise-ai-safety
+  - name: THRESHOLD
+    default: "0.90"
+  - name: TTL_SECONDS
+    default: "3600"

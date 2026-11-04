@@ -1,0 +1,123 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-cohere-command-r-plus-08-2024
+type: feature
+description: >
+  Cohere Command R+ (`cohere/command-r-plus-08-2024`) model target feature.
+  Self-registers the `cohere` route rule (`command-r-plus`,
+  `command-r-plus-08-2024`, `cohere/*`, or `command-*`), defines
+  `cohere-target`, and encapsulates bidirectional payload transcoding between
+  OpenAI Chat Completions and Cohere Chat v1 pinned to `command-r-plus-08-2024`.
+
+defaultEndpoint:
+  name: default
+  routes:
+    - name: cohere
+      condition: llm.model = "command-r-plus" or llm.model = "command-r-plus-08-2024" or llm.model StartsWith "cohere" or llm.model StartsWith "command"
+      target: cohere-target
+
+targets:
+  - name: cohere-target
+    url: https://api.cohere.com/v1/chat
+    flows:
+      - name: PreFlow
+        mode: Request
+        steps:
+          - name: JS-TranscodeOpenAIToCohere
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: JS-TranscodeCohereToOpenAI
+
+policies:
+  - name: JS-TranscodeOpenAIToCohere
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeOpenAIToCohere
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeOpenAIToCohere
+        ResourceURL:
+          _text: "jsc://transcode-openai-to-cohere.js"
+
+  - name: JS-TranscodeCohereToOpenAI
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeCohereToOpenAI
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeCohereToOpenAI
+        ResourceURL:
+          _text: "jsc://transcode-cohere-to-openai.js"
+
+resources:
+  - name: transcode-openai-to-cohere.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("request.content");
+        if (raw) {
+          var openAIBody = JSON.parse(raw);
+          var history = [];
+          var preamble = "";
+          var latestMessage = "";
+          if (openAIBody.messages && Array.isArray(openAIBody.messages)) {
+            for (var i = 0; i < openAIBody.messages.length; i++) {
+              var msg = openAIBody.messages[i];
+              if (msg.role === "system") {
+                preamble = (preamble ? preamble + "\n" : "") + msg.content;
+              } else if (i === openAIBody.messages.length - 1 && msg.role === "user") {
+                latestMessage = msg.content;
+              } else {
+                history.push({
+                  role: msg.role === "assistant" ? "CHATBOT" : "USER",
+                  message: msg.content
+                });
+              }
+            }
+          }
+          var cohereBody = {
+            model: "command-r-plus-08-2024",
+            message: latestMessage,
+            chat_history: history
+          };
+          if (preamble) { cohereBody.preamble = preamble; }
+          context.setVariable("request.content", JSON.stringify(cohereBody));
+          context.setVariable("request.header.Content-Type", "application/json");
+        }
+      } catch (e) {
+        print("Error transcoding OpenAI to Cohere: " + e);
+      }
+
+  - name: transcode-cohere-to-openai.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("response.content");
+        if (raw) {
+          var cohereResp = JSON.parse(raw);
+          var openAIResp = {
+            id: "chatcmpl-" + (cohereResp.generation_id || "cohere-transcoded"),
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: "command-r-plus-08-2024",
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: cohereResp.text || "" },
+              finish_reason: "stop"
+            }]
+          };
+          context.setVariable("response.content", JSON.stringify(openAIResp));
+          context.setVariable("response.header.x-apigee-model", "command-r-plus-08-2024");
+          context.setVariable("response.header.x-apigee-transcoded", "true");
+          context.setVariable("response.header.x-apigee-provider", "cohere");
+        }
+      } catch (e) {
+        print("Error transcoding Cohere to OpenAI: " + e);
+      }

@@ -1,0 +1,51 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-vertex-ai-gemini-2.5-flash
+type: feature
+description: >
+  Google Vertex AI Gemini 2.5 Flash (`vertex_ai/gemini-2.5-flash`) model target
+  feature. Self-registers the `gemini-2-5-flash` route rule on the default
+  ProxyEndpoint (`gemini-2.5-flash`, `gemini-*`, or `vertex_ai/gemini-2.5-flash`)
+  and configures `gemini-target` with model-specific telemetry headers.
+
+defaultEndpoint:
+  name: default
+  routes:
+    - name: gemini
+      condition: llm.model = "gemini-2.5-flash" or llm.model StartsWith "gemini" or llm.model StartsWith "google" or llm.model StartsWith "vertex_ai/gemini-2.5-flash"
+      target: gemini-target
+
+targets:
+  - name: gemini-target
+    url: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/gemini
+    flows:
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: AM-SetGemini25FlashHeaders
+
+policies:
+  - name: AM-SetGemini25FlashHeaders
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-SetGemini25FlashHeaders
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: AM-SetGemini25FlashHeaders
+        Set:
+          Headers:
+            Header:
+              - metadata:
+                  name: x-apigee-model
+                _text: gemini-2.5-flash
+              - metadata:
+                  name: x-apigee-provider
+                _text: vertex_ai
+        IgnoreUnresolvedVariables: "true"
+        AssignTo:
+          metadata:
+            createNew: "false"
+            transport: http
+            type: response

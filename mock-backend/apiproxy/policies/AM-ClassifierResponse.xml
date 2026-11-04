@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<AssignMessage async="false" continueOnError="false" enabled="true" name="AM-ClassifierResponse">
+    <DisplayName>AM-ClassifierResponse</DisplayName>
+    <Set>
+        <Headers>
+            <Header name="Content-Type">application/json</Header>
+            <Header name="x-backend-model">gemini-2.5-flash-lite</Header>
+        </Headers>
+        <Payload contentType="application/json">{
+  "id": "chatcmpl-classifier-flash-lite",
+  "object": "chat.completion",
+  "created": 1730623300,
+  "model": "gemini-2.5-flash-lite",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{classifier.category}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 22,
+    "completion_tokens": 2,
+    "total_tokens": 24
+  }
+}</Payload>
+        <StatusCode>200</StatusCode>
+    </Set>
+    <IgnoreUnresolvedVariables>true</IgnoreUnresolvedVariables>
+    <AssignTo createNew="false" transport="http" type="response"/>
+</AssignMessage>

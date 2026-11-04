@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<AssignMessage async="false" continueOnError="false" enabled="true" name="AM-AnthropicResponse">
+    <DisplayName>AM-AnthropicResponse</DisplayName>
+    <Set>
+        <Headers>
+            <Header name="Content-Type">application/json</Header>
+            <Header name="x-backend-model">claude-3-5-sonnet-20241022</Header>
+            <Header name="x-backend-provider">mock-anthropic-claude</Header>
+        </Headers>
+        <Payload contentType="application/json">{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-3-5-sonnet-20241022",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello! I am Claude (Anthropic Messages API). I received your transcoded request: \"{anthropic.user_prompt}\". Seamlessly served via Apigee failover."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 16,
+    "output_tokens": 34
+  }
+}</Payload>
+        <StatusCode>200</StatusCode>
+    </Set>
+    <IgnoreUnresolvedVariables>true</IgnoreUnresolvedVariables>
+    <AssignTo createNew="false" transport="http" type="response"/>
+</AssignMessage>

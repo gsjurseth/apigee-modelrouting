@@ -1,0 +1,138 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-bedrock-llama-3.3-70b-instruct
+type: feature
+description: >
+  AWS Bedrock Meta Llama 3.3 70B Instruct (`bedrock/llama-3.3-70b-instruct`)
+  model target feature. Self-registers the `bedrock-llama` route rule
+  (`llama-3.3-70b`, `llama-*`, or `bedrock/*`), configures `bedrock-llama-target`
+  (`meta.llama3-3-70b-instruct-v1:0/converse`), and encapsulates bidirectional
+  payload transcoding between OpenAI Chat Completions and AWS Bedrock Converse API.
+
+defaultEndpoint:
+  name: default
+  routes:
+    - name: bedrock-llama
+      condition: llm.model = "llama-3.3-70b" or llm.model = "llama-3.3-70b-instruct" or llm.model StartsWith "llama" or llm.model StartsWith "meta" or llm.model StartsWith "bedrock"
+      target: bedrock-llama-target
+
+targets:
+  - name: bedrock-llama-target
+    url: https://bedrock-runtime.us-east-1.amazonaws.com/model/meta.llama3-3-70b-instruct-v1:0/converse
+    flows:
+      - name: PreFlow
+        mode: Request
+        steps:
+          - name: JS-TranscodeOpenAIToBedrock
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: JS-TranscodeBedrockToOpenAI
+
+policies:
+  - name: JS-TranscodeOpenAIToBedrock
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeOpenAIToBedrock
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeOpenAIToBedrock
+        ResourceURL:
+          _text: "jsc://transcode-openai-to-bedrock.js"
+
+  - name: JS-TranscodeBedrockToOpenAI
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeBedrockToOpenAI
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeBedrockToOpenAI
+        ResourceURL:
+          _text: "jsc://transcode-bedrock-to-openai.js"
+
+resources:
+  - name: transcode-openai-to-bedrock.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("request.content");
+        if (raw) {
+          var openAIBody = JSON.parse(raw);
+          var bedrockMessages = [];
+          var systemBlocks = [];
+          if (openAIBody.messages && Array.isArray(openAIBody.messages)) {
+            for (var i = 0; i < openAIBody.messages.length; i++) {
+              var msg = openAIBody.messages[i];
+              if (msg.role === "system") {
+                systemBlocks.push({ text: msg.content });
+              } else {
+                bedrockMessages.push({
+                  role: msg.role,
+                  content: [{ text: msg.content }]
+                });
+              }
+            }
+          }
+          var bedrockBody = {
+            messages: bedrockMessages,
+            inferenceConfig: {
+              maxTokens: openAIBody.max_tokens || 1024,
+              temperature: openAIBody.temperature || 0.7
+            }
+          };
+          if (systemBlocks.length > 0) { bedrockBody.system = systemBlocks; }
+          context.setVariable("request.content", JSON.stringify(bedrockBody));
+          context.setVariable("request.header.Content-Type", "application/json");
+        }
+      } catch (e) {
+        print("Error transcoding OpenAI to Bedrock Converse: " + e);
+      }
+
+  - name: transcode-bedrock-to-openai.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("response.content");
+        if (raw) {
+          var bedrockResp = JSON.parse(raw);
+          var text = "";
+          if (bedrockResp.output && bedrockResp.output.message &&
+              Array.isArray(bedrockResp.output.message.content)) {
+            for (var i = 0; i < bedrockResp.output.message.content.length; i++) {
+              if (bedrockResp.output.message.content[i].text) {
+                text += bedrockResp.output.message.content[i].text;
+              }
+            }
+          }
+          var inTok = (bedrockResp.usage && bedrockResp.usage.inputTokens) || 12;
+          var outTok = (bedrockResp.usage && bedrockResp.usage.outputTokens) || 28;
+          var openAIResp = {
+            id: "chatcmpl-bedrock-llama-" + Date.now(),
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: "meta.llama3-3-70b-instruct-v1:0",
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: text },
+              finish_reason: "stop"
+            }],
+            usage: {
+              prompt_tokens: inTok,
+              completion_tokens: outTok,
+              total_tokens: inTok + outTok
+            }
+          };
+          context.setVariable("response.content", JSON.stringify(openAIResp));
+          context.setVariable("response.header.x-apigee-model", "meta.llama3-3-70b-instruct-v1:0");
+          context.setVariable("response.header.x-apigee-transcoded", "true");
+          context.setVariable("response.header.x-apigee-provider", "aws-bedrock");
+        }
+      } catch (e) {
+        print("Error transcoding Bedrock Converse to OpenAI: " + e);
+      }

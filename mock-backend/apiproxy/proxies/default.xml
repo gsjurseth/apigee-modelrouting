@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ProxyEndpoint name="default">
+    <Description>Mock LLM backends endpoint</Description>
+    <FaultRules>
+        <FaultRule name="QuotaFaultRule">
+            <Condition>fault.name = "QuotaViolation" or ratelimit.failed = true</Condition>
+            <Step>
+                <Name>AM-QuotaExceededFault</Name>
+            </Step>
+        </FaultRule>
+    </FaultRules>
+    <DefaultFaultRule name="DefaultFault">
+        <AlwaysEnforce>true</AlwaysEnforce>
+        <Step>
+            <Condition>fault.name = "QuotaViolation" or ratelimit.failed = true</Condition>
+            <Name>AM-QuotaExceededFault</Name>
+        </Step>
+    </DefaultFaultRule>
+    <PreFlow name="PreFlow">
+        <Request/>
+        <Response/>
+    </PreFlow>
+    <PostFlow name="PostFlow">
+        <Request/>
+        <Response/>
+    </PostFlow>
+    <Flows>
+        <Flow name="PrimaryModel">
+            <Description>OpenAI-compatible primary model with 2 req/min quota (bypassed when x-semantic-routed is true)</Description>
+            <Request>
+                <Step>
+                    <Condition>not (request.header.x-semantic-routed = "true")</Condition>
+                    <Name>Q-PrimaryQuota</Name>
+                </Step>
+                <Step>
+                    <Name>AM-PrimaryResponse</Name>
+                </Step>
+            </Request>
+            <Response/>
+            <Condition>(proxy.pathsuffix MatchesPath "/primary") and (request.verb = "POST")</Condition>
+        </Flow>
+        <Flow name="AnthropicModel">
+            <Description>Anthropic Messages API model with format validation</Description>
+            <Request>
+                <Step>
+                    <Name>JS-ValidateAnthropic</Name>
+                </Step>
+                <Step>
+                    <Condition>anthropic.valid = "false"</Condition>
+                    <Name>RF-AnthropicInvalidRequest</Name>
+                </Step>
+                <Step>
+                    <Condition>anthropic.valid = "true"</Condition>
+                    <Name>AM-AnthropicResponse</Name>
+                </Step>
+            </Request>
+            <Response/>
+            <Condition>(proxy.pathsuffix MatchesPath "/anthropic") and (request.verb = "POST")</Condition>
+        </Flow>
+        <Flow name="ClassifierModel">
+            <Description>Fast, inexpensive Gemini 2.5 Flash-Lite semantic route classifier</Description>
+            <Request>
+                <Step>
+                    <Name>JS-ClassifyPromptIntent</Name>
+                </Step>
+                <Step>
+                    <Name>AM-ClassifierResponse</Name>
+                </Step>
+            </Request>
+            <Response/>
+            <Condition>(proxy.pathsuffix MatchesPath "/classifier") and (request.verb = "POST")</Condition>
+        </Flow>
+        <Flow name="GeminiFlashModel">
+            <Description>Google Gemini 2.5 Flash low-cost economy model</Description>
+            <Request>
+                <Step>
+                    <Name>JS-PrepareGeminiResponse</Name>
+                </Step>
+                <Step>
+                    <Name>AM-GeminiResponse</Name>
+                </Step>
+            </Request>
+            <Response/>
+            <Condition>(proxy.pathsuffix MatchesPath "/gemini") and (request.verb = "POST")</Condition>
+        </Flow>
+    </Flows>
+    <HTTPProxyConnection>
+        <BasePath>/mock-llm</BasePath>
+        <Properties/>
+        <VirtualHost>default</VirtualHost>
+        <VirtualHost>secure</VirtualHost>
+    </HTTPProxyConnection>
+    <RouteRule name="noroute"/>
+</ProxyEndpoint>

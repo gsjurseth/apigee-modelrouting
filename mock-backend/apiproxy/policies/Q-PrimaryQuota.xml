@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Quota async="false" continueOnError="false" enabled="true" name="Q-PrimaryQuota">
+    <DisplayName>Q-PrimaryQuota</DisplayName>
+    <Properties/>
+    <Allow count="2"/>
+    <Interval>1</Interval>
+    <TimeUnit>minute</TimeUnit>
+    <Identifier ref="request.header.x-demo-client-id">
+        <DefaultValue>demo-user</DefaultValue>
+    </Identifier>
+    <Distributed>true</Distributed>
+    <Synchronous>true</Synchronous>
+</Quota>

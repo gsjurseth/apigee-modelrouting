@@ -1,0 +1,16 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: aft-demo-simple-03
+description: >
+  Stage 3 -- Onboard Anthropic Claude 3.5 Sonnet with Built-in Payload
+  Transcoding (compiled from Model Routing config). Adds
+  target-anthropic-claude-3-5-sonnet-20241022.yaml.
+features:
+  - llm-base.yaml
+  - llm-openai-format.yaml
+  - target-openai-gpt-4o.yaml
+  - target-vertex-ai-gemini-2.5-flash.yaml
+  - target-anthropic-claude-3-5-sonnet-20241022.yaml
+parameters:
+  - name: BASE_PATH
+    default: /v1/chat/simple-stage3

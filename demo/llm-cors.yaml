@@ -1,0 +1,83 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-cors
+type: feature
+description: >
+  Cross-Origin Resource Sharing (CORS). Automatically handles browser OPTIONS
+  preflight requests with 200 OK and injects Access-Control-Allow-* headers
+  into all responses so web dashboards can call the gateway directly.
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: AM-CORSPreflight
+          condition: request.verb = "OPTIONS"
+    - name: PostFlow
+      mode: Response
+      steps:
+        - name: AM-AddCORSResponseHeaders
+
+policies:
+  - name: AM-CORSPreflight
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-CORSPreflight
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: AM-CORSPreflight
+        Set:
+          Headers:
+            Header:
+              - metadata:
+                  name: Access-Control-Allow-Origin
+                _text: "*"
+              - metadata:
+                  name: Access-Control-Allow-Methods
+                _text: "GET, POST, OPTIONS"
+              - metadata:
+                  name: Access-Control-Allow-Headers
+                _text: "*"
+              - metadata:
+                  name: Access-Control-Max-Age
+                _text: "86400"
+          StatusCode: 200
+          ReasonPhrase: OK
+        IgnoreUnresolvedVariables: "true"
+        AssignTo:
+          metadata:
+            createNew: "false"
+            transport: http
+            type: response
+
+  - name: AM-AddCORSResponseHeaders
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-AddCORSResponseHeaders
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: AM-AddCORSResponseHeaders
+        Set:
+          Headers:
+            Header:
+              - metadata:
+                  name: Access-Control-Allow-Origin
+                _text: "*"
+              - metadata:
+                  name: Access-Control-Allow-Methods
+                _text: "GET, POST, OPTIONS"
+              - metadata:
+                  name: Access-Control-Allow-Headers
+                _text: "*"
+        IgnoreUnresolvedVariables: "true"
+        AssignTo:
+          metadata:
+            createNew: "false"
+            transport: http
+            type: response

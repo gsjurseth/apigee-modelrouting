@@ -1,0 +1,14 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: aft-demo-simple-01
+description: >
+  Stage 1 -- Single Model Proxy (compiled from Model Routing config).
+  Minimal 3-feature proxy connecting an OpenAI-format client to
+  target-openai-gpt-4o.yaml.
+features:
+  - llm-base.yaml
+  - llm-openai-format.yaml
+  - target-openai-gpt-4o.yaml
+parameters:
+  - name: BASE_PATH
+    default: /v1/chat/simple-stage1

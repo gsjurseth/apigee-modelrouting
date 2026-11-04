@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<APIProxy revision="3" name="mock-llm-backends">
+    <ConfigurationVersion majorVersion="4" minorVersion="0"/>
+    <CreatedAt>1730623300000</CreatedAt>
+    <Description>Mock LLM backends for progressive AI Gateway demo (Primary GPT-4o, Anthropic Claude, Gemini 2.5 Flash, and Flash-Lite Semantic Classifier)</Description>
+    <DisplayName>mock-llm-backends</DisplayName>
+    <LastModifiedAt>1730623300000</LastModifiedAt>
+    <Policies>
+        <Policy>Q-PrimaryQuota</Policy>
+        <Policy>AM-PrimaryResponse</Policy>
+        <Policy>JS-ValidateAnthropic</Policy>
+        <Policy>AM-AnthropicResponse</Policy>
+        <Policy>RF-AnthropicInvalidRequest</Policy>
+        <Policy>AM-QuotaExceededFault</Policy>
+        <Policy>JS-ClassifyPromptIntent</Policy>
+        <Policy>AM-ClassifierResponse</Policy>
+        <Policy>JS-PrepareGeminiResponse</Policy>
+        <Policy>AM-GeminiResponse</Policy>
+    </Policies>
+    <ProxyEndpoints>
+        <ProxyEndpoint>default</ProxyEndpoint>
+    </ProxyEndpoints>
+    <Resources>
+        <Resource>jsc://validate-anthropic.js</Resource>
+        <Resource>jsc://classify-prompt-intent.js</Resource>
+        <Resource>jsc://prepare-gemini-response.js</Resource>
+    </Resources>
+    <TargetEndpoints/>
+</APIProxy>

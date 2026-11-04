@@ -1,0 +1,15 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: aft-demo-simple-02
+description: >
+  Stage 2 -- Onboard Google Vertex AI Gemini 2.5 Flash (compiled from Model
+  Routing config). Adds target-vertex-ai-gemini-2.5-flash.yaml via
+  deterministic 1:1 model heuristic.
+features:
+  - llm-base.yaml
+  - llm-openai-format.yaml
+  - target-openai-gpt-4o.yaml
+  - target-vertex-ai-gemini-2.5-flash.yaml
+parameters:
+  - name: BASE_PATH
+    default: /v1/chat/simple-stage2

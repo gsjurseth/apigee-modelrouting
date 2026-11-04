@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<RaiseFault async="false" continueOnError="false" enabled="true" name="RF-AnthropicInvalidRequest">
+    <DisplayName>RF-AnthropicInvalidRequest</DisplayName>
+    <FaultResponse>
+        <Set>
+            <Headers>
+                <Header name="Content-Type">application/json</Header>
+                <Header name="x-backend-provider">mock-anthropic-claude</Header>
+            </Headers>
+            <Payload contentType="application/json">{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "Anthropic Messages API 400: {anthropic.error_msg}"
+  }
+}</Payload>
+            <StatusCode>400</StatusCode>
+            <ReasonPhrase>Bad Request</ReasonPhrase>
+        </Set>
+    </FaultResponse>
+    <IgnoreUnresolvedVariables>true</IgnoreUnresolvedVariables>
+</RaiseFault>

@@ -1,0 +1,20 @@
+# Stage 2: Add Google Vertex AI Gemini 2.5 Flash
+# - Deterministic 1:1 Feature Heuristic:
+#     `openai/gpt-4o`              -> `demo/target-openai-gpt-4o.yaml`
+#     `vertex_ai/gemini-2.5-flash` -> `demo/target-vertex-ai-gemini-2.5-flash.yaml`
+
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 2
+      tpm: 40000
+
+  - model_name: gemini-2.5-flash
+    model_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: apigee-product-demo
+      vertex_location: us-central1
+      rpm: 1000
+      tpm: 2000000

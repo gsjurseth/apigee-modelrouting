@@ -1,0 +1,70 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-deepseek-reasoner
+type: feature
+description: Auto-synthesized AFT model feature for 'deepseek-r1' (deepseek/deepseek-reasoner).
+  Self-registers route rule, TargetEndpoint (https://api.deepseek.com/v1/chat/completions),
+  and model version normalization pinned to 'deepseek-reasoner'.
+defaultEndpoint:
+  name: default
+  routes:
+  - name: route-deepseek-reasoner
+    condition: llm.model = "deepseek-r1" or llm.model = "deepseek-reasoner" or llm.model
+      = "deepseek/deepseek-reasoner" or llm.model StartsWith "deepseek-r1"
+    target: deepseek-reasoner-target
+targets:
+- name: deepseek-reasoner-target
+  url: https://api.deepseek.com/v1/chat/completions
+  flows:
+  - name: PreFlow
+    mode: Request
+    steps:
+    - name: JS-NormalizeDeepseekReasonerRequest
+  - name: PostFlow
+    mode: Response
+    steps:
+    - name: AM-SetDeepseekReasonerHeaders
+policies:
+- name: JS-NormalizeDeepseekReasonerRequest
+  type: Javascript
+  content:
+    Javascript:
+      metadata:
+        name: JS-NormalizeDeepseekReasonerRequest
+        timeLimit: '200'
+        continueOnError: 'false'
+        enabled: 'true'
+      DisplayName: JS-NormalizeDeepseekReasonerRequest
+      ResourceURL:
+        _text: jsc://normalize-deepseek-reasoner-request.js
+- name: AM-SetDeepseekReasonerHeaders
+  type: AssignMessage
+  content:
+    AssignMessage:
+      metadata:
+        name: AM-SetDeepseekReasonerHeaders
+        continueOnError: 'true'
+        enabled: 'true'
+      DisplayName: AM-SetDeepseekReasonerHeaders
+      Set:
+        Headers:
+          Header:
+          - metadata:
+              name: x-apigee-model
+            _text: deepseek-reasoner
+          - metadata:
+              name: x-apigee-provider
+            _text: deepseek
+      IgnoreUnresolvedVariables: 'true'
+      AssignTo:
+        metadata:
+          createNew: 'false'
+          transport: http
+          type: response
+resources:
+- name: normalize-deepseek-reasoner-request.js
+  type: jsc
+  content: "try {\n  var raw = context.getVariable(\"request.content\");\n  if (raw)\
+    \ {\n    var body = JSON.parse(raw);\n    body.model = \"deepseek-reasoner\";\n\
+    \    context.setVariable(\"request.content\", JSON.stringify(body));\n  }\n} catch\
+    \ (e) {\n  print(\"Error normalizing deepseek-reasoner request: \" + e);\n}\n"

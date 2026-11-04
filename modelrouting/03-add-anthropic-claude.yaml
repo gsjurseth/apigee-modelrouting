@@ -1,0 +1,28 @@
+# Stage 3: Add Anthropic Claude 3.5 Sonnet (with Automatic Bidirectional Payload Transcoding)
+# - Deterministic 1:1 Feature Heuristic:
+#     `anthropic/claude-3-5-sonnet-20241022` -> `demo/target-anthropic-claude-3-5-sonnet-20241022.yaml`
+# - Encapsulates OpenAI Chat Completions <-> Anthropic Messages v1 payload transcoding
+#   pinned to `claude-3-5-sonnet-20241022`.
+
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 2
+      tpm: 40000
+
+  - model_name: gemini-2.5-flash
+    model_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: apigee-product-demo
+      vertex_location: us-central1
+      rpm: 1000
+      tpm: 2000000
+
+  - model_name: claude-3-5-sonnet
+    model_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 50
+      tpm: 200000

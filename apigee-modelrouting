@@ -1,0 +1,811 @@
+#!/usr/bin/env python3
+"""
+apigee-modelrouting: Compile declarative Model Routing config files (modelrouting/*.yaml)
+into Apigee Feature Templates (AFT) and optionally import them directly into Apigee
+via `gcloud beta apigee apis import`.
+
+Supports:
+  - Deterministic 1:1 Model-to-Feature Heuristic (`<provider>/<model-version>` -> `target-<provider>-<model-version>.yaml`)
+  - Multi-provider `model_list` (with rpm/tpm quotas & automatic brand-new model/version feature synthesis)
+  - `router_settings`: routing_strategy, num_retries, retry_after, timeout, cooldown_time,
+    ordered `fallbacks` priority chains, `context_window_fallbacks`, `content_policy_fallbacks`
+  - `gateway_settings`: `semantic_cache` (Vertex Vector Search) & `model_armor` (Prompt/Response Sanitization)
+  - `auto_router/complexity_router`: Semantic intent classification via Flash-Lite (`llm-semantic-router.yaml`)
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+import yaml
+
+# ANSI colors for crisp terminal presentation
+BOLD = "\033[1m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+MAGENTA = "\033[35m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+# Provider wire-protocol metadata used for display and version-specific feature synthesis
+PROVIDER_PROTOCOL_INFO = {
+    "openai": "Native OpenAI Chat Completions wire format",
+    "vertex_ai": "Vertex AI Gemini endpoint + GoogleAccessToken IAM auth",
+    "gemini": "Vertex AI Gemini endpoint + GoogleAccessToken IAM auth",
+    "google": "Vertex AI Gemini endpoint + GoogleAccessToken IAM auth",
+    "anthropic": "Auto-Transcoded: OpenAI <-> Anthropic Messages v1 API",
+    "bedrock": "Auto-Transcoded: OpenAI <-> AWS Bedrock Converse API",
+    "cohere": "Auto-Transcoded: OpenAI <-> Cohere Chat v1 API",
+    "mistral": "OpenAI-compat + Mistral model version normalization",
+}
+
+# Known stage metadata defaults so modelrouting/*.yaml files don't need any Apigee boilerplate
+STAGE_DEFAULTS = {
+    "01-single-model.yaml": {
+        "proxy_name": "aft-demo-simple-01",
+        "base_path": "/v1/chat/simple-stage1",
+        "include_cors": False,
+        "description": (
+            "Stage 1 -- Single Model Proxy (compiled from Model Routing config). "
+            "Minimal 3-feature proxy connecting an OpenAI-format client to target-openai-gpt-4o.yaml."
+        ),
+    },
+    "02-add-vertex-gemini.yaml": {
+        "proxy_name": "aft-demo-simple-02",
+        "base_path": "/v1/chat/simple-stage2",
+        "include_cors": False,
+        "description": (
+            "Stage 2 -- Onboard Google Vertex AI Gemini 2.5 Flash (compiled from Model Routing config). "
+            "Adds target-vertex-ai-gemini-2.5-flash.yaml via deterministic 1:1 model heuristic."
+        ),
+    },
+    "03-add-anthropic-claude.yaml": {
+        "proxy_name": "aft-demo-simple-03",
+        "base_path": "/v1/chat/simple-stage3",
+        "include_cors": False,
+        "description": (
+            "Stage 3 -- Onboard Anthropic Claude 3.5 Sonnet with Built-in Payload Transcoding "
+            "(compiled from Model Routing config). Adds target-anthropic-claude-3-5-sonnet-20241022.yaml."
+        ),
+    },
+    "04-expand-model-catalog.yaml": {
+        "proxy_name": "aft-demo-simple-04",
+        "base_path": "/v1/chat/simple-stage4",
+        "include_cors": False,
+        "description": (
+            "Stage 4 -- Scale to Multi-Cloud Enterprise Catalog + Auto-Synthesize Brand-New Model Feature "
+            "(compiled from Model Routing config). Onboards OpenAI GPT-4o, Vertex Gemini 2.5 Flash, "
+            "Anthropic Claude 3.5 Sonnet, AWS Bedrock Llama 3.3 70B, Cohere Command R+, Mistral Large 2411, "
+            "and auto-synthesizes DeepSeek R1 (target-deepseek-reasoner.yaml)."
+        ),
+    },
+    "05-failover-gateway.yaml": {
+        "proxy_name": "aft-demo-simple-05",
+        "base_path": "/v1/chat/simple-stage5",
+        "include_cors": True,
+        "description": (
+            "Stage 5 -- Resilient Enterprise AI Gateway with Semantic Cache, Model Armor, Retries, "
+            "and Ordered Multi-Hop Failover (compiled from Model Routing config)."
+        ),
+    },
+    "06-semantic-routing.yaml": {
+        "proxy_name": "aft-demo-semantic-router",
+        "base_path": "/v1/chat/semantic-router",
+        "include_cors": True,
+        "description": (
+            "Stage 6 -- Semantic Model Routing Gateway + Enterprise Guardrails (compiled from Model Routing config). "
+            "Maps auto_router/complexity_router to llm-semantic-router.yaml alongside Semantic Cache and Model Armor."
+        ),
+    },
+}
+
+
+def model_string_to_feature_filename(model_str: str) -> str:
+    """
+    Deterministic 1:1 Heuristic mapping a `<provider>/<model-version>` string
+    directly to a self-evident, version-specific AFT feature filename:
+      - openai/gpt-4o                        -> target-openai-gpt-4o.yaml
+      - vertex_ai/gemini-2.5-flash           -> target-vertex-ai-gemini-2.5-flash.yaml
+      - vertex_ai/gemini-3.5-flash           -> target-vertex-ai-gemini-3.5-flash.yaml
+      - anthropic/claude-3-5-sonnet-20241022 -> target-anthropic-claude-3-5-sonnet-20241022.yaml
+      - bedrock/llama-3.3-70b-instruct       -> target-bedrock-llama-3.3-70b-instruct.yaml
+      - cohere/command-r-plus-08-2024        -> target-cohere-command-r-plus-08-2024.yaml
+      - mistral/mistral-large-2411           -> target-mistral-large-2411.yaml
+      - deepseek/deepseek-reasoner           -> target-deepseek-reasoner.yaml
+    """
+    if "/" in model_str:
+        provider, model_id = model_str.lower().split("/", 1)
+    else:
+        provider, model_id = "openai", model_str.lower()
+    p_slug = re.sub(r"[^a-z0-9.]+", "-", provider).strip("-")
+    m_slug = re.sub(r"[^a-z0-9.]+", "-", model_id).strip("-")
+    if m_slug.startswith(f"{p_slug}-"):
+        return f"target-{m_slug}.yaml"
+    return f"target-{p_slug}-{m_slug}.yaml"
+
+
+def synthesize_model_target_feature(
+    demo_dir: Path,
+    feature_filename: str,
+    model_name: str,
+    provider: str,
+    model_id: str,
+    params: dict,
+) -> str:
+    """
+    Heuristic Feature Synthesizer: when a user adds a brand-new provider or a new model
+    version (e.g. `deepseek/deepseek-reasoner`, `vertex_ai/gemini-3.5-flash`,
+    `anthropic/claude-3-7-sonnet-20250219`) to `model_list` that doesn't yet have
+    a `demo/target-<provider>-<model-version>.yaml` file on disk, automatically
+    generate a self-contained AFT feature (`type: feature`) pinned to that exact
+    model version (`model_id`).
+    """
+    feature_stem = feature_filename[:-5] if feature_filename.endswith(".yaml") else feature_filename
+    slug = re.sub(r"[^a-z0-9]+", "-", feature_stem.replace("target-", "")).strip("-")
+    pascal = "".join(part.capitalize() for part in slug.split("-"))
+    feature_path = demo_dir / feature_filename
+    target_name = f"{slug}-target"
+
+    if provider in ("vertex_ai", "gemini", "google"):
+        project = params.get("vertex_project") or os.environ.get("APIGEE_ORG", "apigee-product-demo")
+        location = params.get("vertex_location") or "us-central1"
+        default_url = (
+            f"https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}"
+            f"/locations/{location}/endpoints/openapi/chat/completions"
+        )
+    elif provider == "anthropic":
+        default_url = "https://api.anthropic.com/v1/messages"
+    elif provider == "cohere":
+        default_url = "https://api.cohere.com/v1/chat"
+    elif provider == "bedrock":
+        region = params.get("aws_region_name") or "us-east-1"
+        default_url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id}/converse"
+    else:
+        default_url = f"https://api.{provider}.com/v1/chat/completions"
+
+    api_base = params.get("api_base") or default_url
+    js_policy_name = f"JS-Normalize{pascal}Request"
+    am_policy_name = f"AM-Set{pascal}Headers"
+    js_resource_name = f"normalize-{slug}-request.js"
+
+    feature_doc = {
+        "gateway": "apigee",
+        "schemaVersion": "1.0.0",
+        "name": feature_stem,
+        "type": "feature",
+        "description": (
+            f"Auto-synthesized AFT model feature for '{model_name}' "
+            f"({provider}/{model_id}). Self-registers route rule, TargetEndpoint ({api_base}), "
+            f"and model version normalization pinned to '{model_id}'."
+        ),
+        "defaultEndpoint": {
+            "name": "default",
+            "routes": [
+                {
+                    "name": f"route-{slug}",
+                    "condition": (
+                        f'llm.model = "{model_name}" or '
+                        f'llm.model = "{model_id}" or '
+                        f'llm.model = "{provider}/{model_id}" or '
+                        f'llm.model StartsWith "{model_name}"'
+                    ),
+                    "target": target_name,
+                }
+            ],
+        },
+        "targets": [
+            {
+                "name": target_name,
+                "url": api_base,
+                "flows": [
+                    {
+                        "name": "PreFlow",
+                        "mode": "Request",
+                        "steps": [{"name": js_policy_name}],
+                    },
+                    {
+                        "name": "PostFlow",
+                        "mode": "Response",
+                        "steps": [{"name": am_policy_name}],
+                    },
+                ],
+            }
+        ],
+        "policies": [
+            {
+                "name": js_policy_name,
+                "type": "Javascript",
+                "content": {
+                    "Javascript": {
+                        "metadata": {
+                            "name": js_policy_name,
+                            "timeLimit": "200",
+                            "continueOnError": "false",
+                            "enabled": "true",
+                        },
+                        "DisplayName": js_policy_name,
+                        "ResourceURL": {"_text": f"jsc://{js_resource_name}"},
+                    }
+                },
+            },
+            {
+                "name": am_policy_name,
+                "type": "AssignMessage",
+                "content": {
+                    "AssignMessage": {
+                        "metadata": {
+                            "name": am_policy_name,
+                            "continueOnError": "true",
+                            "enabled": "true",
+                        },
+                        "DisplayName": am_policy_name,
+                        "Set": {
+                            "Headers": {
+                                "Header": [
+                                    {"metadata": {"name": "x-apigee-model"}, "_text": model_id},
+                                    {"metadata": {"name": "x-apigee-provider"}, "_text": provider},
+                                ]
+                            }
+                        },
+                        "IgnoreUnresolvedVariables": "true",
+                        "AssignTo": {
+                            "metadata": {
+                                "createNew": "false",
+                                "transport": "http",
+                                "type": "response",
+                            }
+                        },
+                    }
+                },
+            },
+        ],
+        "resources": [
+            {
+                "name": js_resource_name,
+                "type": "jsc",
+                "content": (
+                    "try {\n"
+                    '  var raw = context.getVariable("request.content");\n'
+                    "  if (raw) {\n"
+                    "    var body = JSON.parse(raw);\n"
+                    f'    body.model = "{model_id}";\n'
+                    '    context.setVariable("request.content", JSON.stringify(body));\n'
+                    "  }\n"
+                    "} catch (e) {\n"
+                    f'  print("Error normalizing {slug} request: " + e);\n'
+                    "}\n"
+                ),
+            }
+        ],
+    }
+
+    with open(feature_path, "w", encoding="utf-8") as f:
+        yaml.dump(feature_doc, f, sort_keys=False, default_flow_style=False)
+    return feature_filename
+
+
+def is_auto_synthesized_feature(feature_path: Path) -> bool:
+    """Return True if the feature file on disk was created by the heuristic synthesizer."""
+    if not feature_path.exists():
+        return False
+    try:
+        text = feature_path.read_text(encoding="utf-8")
+        return "Auto-synthesized AFT model feature" in text
+    except Exception:
+        return False
+
+
+def compile_modelrouting_to_aft(
+    config_path: Path,
+    demo_dir: Path,
+    proxy_name_override: str = None,
+    base_path_override: str = None,
+):
+    """Parse a declarative Model Routing config.yaml and return (aft_yaml_str, report_metadata, out_path)."""
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    fname = config_path.name
+    defaults = STAGE_DEFAULTS.get(fname, {})
+    general = cfg.get("general_settings") or {}
+    router_settings = cfg.get("router_settings") or {}
+    gateway_settings = cfg.get("gateway_settings") or {}
+
+    proxy_name = (
+        proxy_name_override
+        or general.get("proxy_name")
+        or defaults.get("proxy_name")
+        or f"aft-modelrouting-{re.sub(r'[^a-z0-9]+', '-', config_path.stem.lower()).strip('-')}"
+    )
+    base_path = (
+        base_path_override
+        or general.get("base_path")
+        or defaults.get("base_path")
+        or f"/v1/chat/{re.sub(r'[^a-z0-9]+', '-', config_path.stem.lower()).strip('-')}"
+    )
+    description = general.get("description") or defaults.get(
+        "description",
+        f"Apigee AI Gateway Proxy compiled from Model Routing config ({fname}).",
+    )
+
+    include_cors = (
+        defaults.get("include_cors", False)
+        or bool(general.get("enable_cors"))
+        or bool(gateway_settings.get("drop_params"))
+    )
+
+    model_list = cfg.get("model_list") or []
+    mapped_models = []
+    auto_router_cfg = None
+
+    for entry in model_list:
+        m_name = entry.get("model_name", "default")
+        params = entry.get("model_params") or entry.get("params") or {}
+        full_model = params.get("model", "")
+
+        if "/" in full_model:
+            provider, model_id = full_model.split("/", 1)
+        else:
+            provider, model_id = "openai", full_model
+
+        provider_low = provider.lower()
+
+        # Check for Auto Router / Complexity Router pseudo-model
+        if provider_low == "auto_router" or (m_name == "auto" and "complexity_router" in full_model):
+            auto_router_cfg = entry.get("complexity_router_config") or {
+                "classifier_model": "vertex_ai/gemini-2.5-flash-lite",
+                "tiers": {
+                    "SIMPLE_QA": ["gemini-2.5-flash"],
+                    "CODING": ["claude-3-5-sonnet"],
+                    "COMPLEX_REASONING": ["gpt-4o"],
+                },
+            }
+            continue
+
+        # Deterministic 1:1 Heuristic: `<provider>/<model-version>` -> `target-<provider>-<model-version>.yaml`
+        feat_file = model_string_to_feature_filename(full_model)
+        feat_path = demo_dir / feat_file
+
+        if not feat_path.exists():
+            synthesize_model_target_feature(demo_dir, feat_file, m_name, provider_low, model_id, params)
+            is_synthesized = True
+        else:
+            is_synthesized = is_auto_synthesized_feature(feat_path)
+
+        if is_synthesized:
+            transcoding = f"★ AUTO-SYNTHESIZED ({provider_low}/{model_id}) -> demo/{feat_file}"
+        else:
+            proto_desc = PROVIDER_PROTOCOL_INFO.get(
+                provider_low, f"OpenAI-compatible ({provider_low})"
+            )
+            transcoding = f"Pinned to '{model_id}' ({proto_desc})"
+
+        rpm = params.get("rpm")
+        tpm = params.get("tpm")
+        mapped_models.append({
+            "model_name": m_name,
+            "target_model": full_model,
+            "provider": provider_low,
+            "model_id": model_id,
+            "feature": feat_file,
+            "transcoding": transcoding,
+            "rpm": rpm,
+            "tpm": tpm,
+            "is_synthesized": is_synthesized,
+        })
+
+    if auto_router_cfg is not None or router_settings.get("routing_strategy") == "semantic-routing":
+        include_cors = True
+
+    fallbacks = (
+        router_settings.get("fallbacks")
+        or gateway_settings.get("fallbacks")
+        or cfg.get("fallbacks")
+        or []
+    )
+    context_window_fallbacks = router_settings.get("context_window_fallbacks") or []
+    content_policy_fallbacks = router_settings.get("content_policy_fallbacks") or []
+    routing_strategy = router_settings.get("routing_strategy")
+    num_retries = router_settings.get("num_retries")
+    retry_after = router_settings.get("retry_after")
+    timeout = router_settings.get("timeout")
+    cooldown_time = router_settings.get("cooldown_time")
+
+    has_router_policy = bool(
+        routing_strategy
+        or num_retries is not None
+        or context_window_fallbacks
+        or content_policy_fallbacks
+        or cooldown_time is not None
+    )
+
+    sem_cache_cfg = gateway_settings.get("semantic_cache") or {}
+    has_semantic_cache = bool(
+        sem_cache_cfg is True
+        or (isinstance(sem_cache_cfg, dict) and sem_cache_cfg.get("enabled", bool(sem_cache_cfg)))
+    )
+
+    model_armor_cfg = gateway_settings.get("model_armor") or {}
+    has_model_armor = bool(
+        model_armor_cfg is True
+        or (isinstance(model_armor_cfg, dict) and model_armor_cfg.get("enabled", bool(model_armor_cfg)))
+    )
+
+    if fallbacks or has_router_policy or has_semantic_cache or has_model_armor:
+        include_cors = True
+
+    # Assemble ordered feature list matching our AFT templates
+    features = ["llm-base.yaml"]
+    if include_cors:
+        features.append("llm-cors.yaml")
+    features.append("llm-openai-format.yaml")
+
+    if has_model_armor:
+        features.append("llm-model-armor.yaml")
+
+    if has_semantic_cache:
+        features.append("llm-semantic-cache.yaml")
+
+    if has_router_policy:
+        features.append("llm-retry-and-loadbalance.yaml")
+
+    if auto_router_cfg is not None or routing_strategy == "semantic-routing":
+        features.append("llm-semantic-router.yaml")
+
+    for m in mapped_models:
+        if m["feature"] not in features:
+            features.append(m["feature"])
+
+    if fallbacks:
+        features.append("llm-failover.yaml")
+
+    # Build parameters list (always BASE_PATH, plus optional overrides from semantic_cache / model_armor)
+    parameters = [{"name": "BASE_PATH", "default": base_path}]
+    if has_model_armor and isinstance(model_armor_cfg, dict) and model_armor_cfg.get("template_id"):
+        parameters.append({"name": "MA_TEMPLATE_PATH", "default": str(model_armor_cfg["template_id"])})
+    if has_semantic_cache and isinstance(sem_cache_cfg, dict):
+        if sem_cache_cfg.get("similarity_threshold") is not None:
+            parameters.append(
+                {"name": "THRESHOLD", "default": f"{float(sem_cache_cfg['similarity_threshold']):.2f}"}
+            )
+        if sem_cache_cfg.get("ttl_seconds") is not None:
+            parameters.append({"name": "TTL_SECONDS", "default": str(sem_cache_cfg["ttl_seconds"])})
+
+    # Build AFT YAML string with clean formatting
+    lines = [
+        "gateway: apigee",
+        "schemaVersion: 1.0.0",
+        f"name: {proxy_name}",
+        "description: >",
+    ]
+    words = description.split()
+    cur_line = "  "
+    for w in words:
+        if len(cur_line) + len(w) + 1 > 76:
+            lines.append(cur_line)
+            cur_line = "  " + w
+        else:
+            cur_line = (cur_line + " " + w) if cur_line.strip() else ("  " + w)
+    if cur_line.strip():
+        lines.append(cur_line)
+
+    lines.append("features:")
+    for feat in features:
+        lines.append(f"  - {feat}")
+
+    lines.append("parameters:")
+    for p in parameters:
+        lines.append(f"  - name: {p['name']}")
+        val = p["default"]
+        if re.match(r"^[0-9.]+$", str(val)):
+            lines.append(f'    default: "{val}"')
+        else:
+            lines.append(f"    default: {val}")
+    lines.append("")
+    aft_yaml_str = "\n".join(lines)
+
+    out_path = demo_dir / fname
+    report = {
+        "input_file": str(config_path),
+        "output_file": str(out_path),
+        "proxy_name": proxy_name,
+        "base_path": base_path,
+        "include_cors": include_cors,
+        "mapped_models": mapped_models,
+        "routing_strategy": routing_strategy,
+        "num_retries": num_retries,
+        "retry_after": retry_after,
+        "timeout": timeout,
+        "cooldown_time": cooldown_time,
+        "fallbacks": fallbacks,
+        "context_window_fallbacks": context_window_fallbacks,
+        "content_policy_fallbacks": content_policy_fallbacks,
+        "has_router_policy": has_router_policy,
+        "has_semantic_cache": has_semantic_cache,
+        "sem_cache_cfg": sem_cache_cfg if isinstance(sem_cache_cfg, dict) else {},
+        "has_model_armor": has_model_armor,
+        "model_armor_cfg": model_armor_cfg if isinstance(model_armor_cfg, dict) else {},
+        "auto_router": auto_router_cfg,
+        "features": features,
+    }
+    return aft_yaml_str, report, out_path
+
+
+def format_fallback_chain(fallbacks: list) -> str:
+    parts = []
+    for item in fallbacks:
+        if isinstance(item, dict):
+            for src, targets in item.items():
+                ranked = " -> ".join(f"[P{idx+1}] {t}" for idx, t in enumerate(targets))
+                parts.append(f"{src} ==> {ranked}")
+    return "; ".join(parts)
+
+
+def print_translation_report(report: dict, aft_yaml_str: str):
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+    print(f"{BOLD} Declarative Model Routing Config  -->  Apigee Feature Template (AFT) Compiler{RESET}")
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+    print(f"  {BOLD}Input Routing Config:{RESET}  {YELLOW}{report['input_file']}{RESET}")
+    print(f"  {BOLD}Output AFT Template:{RESET}   {GREEN}{report['output_file']}{RESET}")
+    print(
+        f"  {BOLD}Target Apigee Proxy:{RESET}   {BOLD}{report['proxy_name']}{RESET}  "
+        f"({DIM}BASE_PATH: {report['base_path']}{RESET})"
+    )
+    print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
+
+    print(f"  {BOLD}1. Core Apigee Gateway Plumbing (Auto-Injected):{RESET}")
+    print(f"     • {CYAN}llm-base.yaml{RESET}           {DIM}(ProxyEndpoint skeleton){RESET}")
+    if report["include_cors"]:
+        print(f"     • {CYAN}llm-cors.yaml{RESET}           {DIM}(Browser CORS preflight & response headers){RESET}")
+    print(f"     • {CYAN}llm-openai-format.yaml{RESET}  {DIM}(Extracts $.model -> llm.model & prompt){RESET}")
+
+    print(
+        f"\n  {BOLD}2. `model_list` -> Deterministic 1:1 AFT Model Features "
+        f"({len(report['mapped_models'])} models):{RESET}"
+    )
+    print(f"     {DIM}Heuristic: <provider>/<model-version>  ==>  demo/target-<provider>-<model-version>.yaml{RESET}")
+    for m in report["mapped_models"]:
+        q_parts = []
+        if m.get("rpm"):
+            q_parts.append(f"{m['rpm']:,} rpm")
+        if m.get("tpm"):
+            q_parts.append(f"{m['tpm']:,} tpm")
+        quota_badge = f" [quota: {' | '.join(q_parts)}]" if q_parts else ""
+        color = MAGENTA if m.get("is_synthesized") else GREEN
+        print(
+            f"     • {YELLOW}{m['model_name']:<17}{RESET} ({m['target_model']}{quota_badge})\n"
+            f"       └─► {color}{m['feature']:<46}{RESET} {DIM}[{m['transcoding']}]{RESET}"
+        )
+
+    has_sec_3 = (
+        report["has_router_policy"]
+        or report["fallbacks"]
+        or report["auto_router"]
+        or report["has_semantic_cache"]
+        or report["has_model_armor"]
+    )
+    if has_sec_3:
+        print(f"\n  {BOLD}3. `router_settings` & `gateway_settings` -> Enterprise AFT Policy Features:{RESET}")
+        if report["has_model_armor"]:
+            ma = report["model_armor_cfg"]
+            tmpl = ma.get("template_id", "default")
+            print(
+                f"     • {MAGENTA}gateway_settings.model_armor:{RESET} template={tmpl}\n"
+                f"       └─► {GREEN}llm-model-armor.yaml{RESET}              "
+                f"{DIM}[MA-SanitizeUserPrompt + MA-SanitizeModelResponse]{RESET}"
+            )
+        if report["has_semantic_cache"]:
+            sc = report["sem_cache_cfg"]
+            emb = sc.get("embedding_model", "vertex_ai/text-embedding-005")
+            thresh = sc.get("similarity_threshold", 0.90)
+            ttl = sc.get("ttl_seconds", 3600)
+            print(
+                f"     • {MAGENTA}gateway_settings.semantic_cache:{RESET} model={emb}, threshold={thresh}, ttl={ttl}s\n"
+                f"       └─► {GREEN}llm-semantic-cache.yaml{RESET}           "
+                f"{DIM}[SCLLookup (Vector Search) + SCPPopulate]{RESET}"
+            )
+        if report["has_router_policy"]:
+            strat = report["routing_strategy"] or "simple-shuffle"
+            retries = report["num_retries"] if report["num_retries"] is not None else 0
+            cd = report["cooldown_time"] or 0
+            cw = report["context_window_fallbacks"]
+            print(
+                f"     • {MAGENTA}router_settings (retries & strategy):{RESET} strategy={strat}, "
+                f"num_retries={retries}, cooldown={cd}s, context_overflow={cw}\n"
+                f"       └─► {GREEN}llm-retry-and-loadbalance.yaml{RESET}    "
+                f"{DIM}[JS-EvaluateRouterSettings: Retry/Cooldown & Context Overflow]{RESET}"
+            )
+        if report["fallbacks"]:
+            chain_str = format_fallback_chain(report["fallbacks"])
+            print(
+                f"     • {MAGENTA}router_settings.fallbacks (priority order):{RESET} {chain_str}\n"
+                f"       └─► {GREEN}llm-failover.yaml{RESET}                 "
+                f"{DIM}[DefaultFaultRule HTTP 429/5xx -> Ordered Transcode & Failover]{RESET}"
+            )
+        if report["auto_router"]:
+            clf = report["auto_router"].get("classifier_model", "gemini-2.5-flash-lite")
+            tiers = list((report["auto_router"].get("tiers") or {}).keys())
+            print(
+                f"     • {MAGENTA}auto_router/complexity_router:{RESET} classifier={clf}, tiers={tiers}\n"
+                f"       └─► {GREEN}llm-semantic-router.yaml{RESET}          "
+                f"{DIM}[SC-ClassifyPromptIntent -> Rewrites llm.model pre-routing]{RESET}"
+            )
+
+    print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
+    print(f"  {BOLD}Compiled AFT Proxy Template ({report['output_file']}):{RESET}\n")
+    for line in aft_yaml_str.rstrip().splitlines():
+        print(f"    {GREEN}{line}{RESET}")
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+
+
+def print_side_by_side(config_path: Path, aft_yaml_str: str, report: dict):
+    with open(config_path, "r", encoding="utf-8") as f:
+        left_lines = [
+            line.rstrip()
+            for line in f.read().splitlines()
+            if not line.strip().startswith("#")
+        ]
+    while left_lines and not left_lines[0].strip():
+        left_lines.pop(0)
+
+    right_lines = aft_yaml_str.rstrip().splitlines()
+    col_width = 46
+    max_rows = max(len(left_lines), len(right_lines))
+
+    print(f"{BOLD}{CYAN}==================================================================================================={RESET}")
+    print(
+        f" {BOLD}{YELLOW}{'Model Routing Config (What You Write)':<{col_width}}{RESET} │ "
+        f"{BOLD}{GREEN}{'Compiled Apigee AFT Template (Generated)'}{RESET}"
+    )
+    print(f" {DIM}{str(config_path):<{col_width}}{RESET} │ {DIM}{report['output_file']}{RESET}")
+    print(f"{BOLD}{CYAN}--------------------------------────────────────┼──────────────────────────────────────────────────{RESET}")
+    for i in range(max_rows):
+        l_txt = left_lines[i] if i < len(left_lines) else ""
+        r_txt = right_lines[i] if i < len(right_lines) else ""
+        if len(l_txt) > col_width:
+            l_txt = l_txt[: col_width - 1] + "…"
+        print(f" {YELLOW}{l_txt:<{col_width}}{RESET} │ {GREEN}{r_txt}{RESET}")
+    print(f"{BOLD}{CYAN}==================================================================================================={RESET}")
+
+
+def handle_add_model(args, demo_dir: Path):
+    """Add a brand-new model (or new model version) to a modelrouting YAML file and synthesize its AFT feature."""
+    src_path = Path(args.config)
+    if not src_path.exists():
+        sys.exit(f"Error: Model Routing config file not found: {src_path}")
+
+    with open(src_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    model_list = cfg.setdefault("model_list", [])
+    provider = args.model.split("/", 1)[0] if "/" in args.model else "custom"
+    api_base = args.api_base or f"https://api.{provider}.com/v1/chat/completions"
+
+    new_entry = {
+        "model_name": args.name,
+        "model_params": {
+            "model": args.model,
+            "api_base": api_base,
+            "api_key": f"os.environ/{provider.upper()}_API_KEY",
+            "rpm": args.rpm,
+            "tpm": args.tpm,
+        },
+    }
+    model_list = [e for e in model_list if e.get("model_name") != args.name]
+    model_list.append(new_entry)
+    cfg["model_list"] = model_list
+
+    dest_path = Path(args.out) if args.out else src_path
+    with open(dest_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, sort_keys=False, default_flow_style=False)
+
+    feat_name = model_string_to_feature_filename(args.model)
+    print(
+        f"{BOLD}{MAGENTA}★ Added model '{args.name}' ({args.model} -> demo/{feat_name}) to {dest_path}{RESET}\n"
+    )
+    aft_yaml_str, report, out_path = compile_modelrouting_to_aft(dest_path, demo_dir)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(aft_yaml_str)
+    print_translation_report(report, aft_yaml_str)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Compile declarative Model Routing config files (modelrouting/*.yaml) to Apigee Feature Templates (AFT)."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # translate
+    p_trans = subparsers.add_parser("translate", help="Translate a modelrouting/*.yaml file to an AFT template YAML")
+    p_trans.add_argument("config", help="Path to Model Routing YAML file (e.g. modelrouting/05-failover-gateway.yaml)")
+    p_trans.add_argument("--proxy-name", help="Override target Apigee proxy name")
+    p_trans.add_argument("--base-path", help="Override BASE_PATH parameter")
+
+    # diff (side-by-side view)
+    p_diff = subparsers.add_parser("diff", help="Show Model Routing config and compiled AFT template side-by-side")
+    p_diff.add_argument("config", help="Path to Model Routing YAML file (e.g. modelrouting/05-failover-gateway.yaml)")
+
+    # import (translate + gcloud beta apigee apis import)
+    p_imp = subparsers.add_parser("import", help="Translate Model Routing config to AFT and import into Apigee via gcloud")
+    p_imp.add_argument("config", help="Path to Model Routing YAML file (e.g. modelrouting/01-single-model.yaml)")
+    p_imp.add_argument("--organization", "-o", default=os.environ.get("APIGEE_ORG", "apigee-product-demo"))
+    p_imp.add_argument("--proxy-name", help="Override target Apigee proxy name")
+    p_imp.add_argument("--base-path", help="Override BASE_PATH parameter")
+
+    # add-model (onboard a brand-spanking-new model live in 1 command)
+    p_add = subparsers.add_parser(
+        "add-model",
+        help="Onboard a brand-new model into a modelrouting config and auto-synthesize its AFT feature",
+    )
+    p_add.add_argument("config", help="Source modelrouting/*.yaml file")
+    p_add.add_argument("--name", required=True, help="Client-facing model_name (e.g. grok-3)")
+    p_add.add_argument("--model", required=True, help="Provider/model identifier (e.g. xai/grok-3-beta)")
+    p_add.add_argument("--api-base", help="Optional target endpoint URL")
+    p_add.add_argument("--rpm", type=int, default=300, help="Requests Per Minute quota (default: 300)")
+    p_add.add_argument("--tpm", type=int, default=600000, help="Tokens Per Minute quota (default: 600000)")
+    p_add.add_argument("--out", help="Optional output YAML path (defaults to updating config in-place)")
+
+    args = parser.parse_args()
+    root_dir = Path(__file__).resolve().parent
+    demo_dir = root_dir / "demo"
+
+    if args.command == "add-model":
+        handle_add_model(args, demo_dir)
+        return
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        sys.exit(f"Error: Model Routing config file not found: {config_path}")
+
+    aft_yaml_str, report, out_path = compile_modelrouting_to_aft(
+        config_path,
+        demo_dir,
+        proxy_name_override=getattr(args, "proxy_name", None),
+        base_path_override=getattr(args, "base_path", None),
+    )
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(aft_yaml_str)
+
+    if args.command == "translate":
+        print_translation_report(report, aft_yaml_str)
+    elif args.command == "diff":
+        print_side_by_side(config_path, aft_yaml_str, report)
+    elif args.command == "import":
+        print_translation_report(report, aft_yaml_str)
+        token_file = Path("/tmp/adc_token.txt")
+        try:
+            tok = subprocess.check_output(
+                ["gcloud", "auth", "application-default", "print-access-token"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            if tok:
+                token_file.write_text(tok + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        cmd = [
+            "gcloud",
+            "beta",
+            "apigee",
+            "apis",
+            "import",
+            report["proxy_name"],
+            f"--from-template={out_path}",
+            f"--organization={args.organization}",
+        ]
+        if token_file.exists():
+            cmd.append(f"--access-token-file={token_file}")
+        print(
+            f"\n▶ {BOLD}Executing:{RESET} gcloud beta apigee apis import {report['proxy_name']} "
+            f"--from-template=demo/{out_path.name} --organization={args.organization}"
+        )
+        res = subprocess.run(cmd)
+        sys.exit(res.returncode)
+
+
+if __name__ == "__main__":
+    main()

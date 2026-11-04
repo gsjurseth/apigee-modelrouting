@@ -1,0 +1,13 @@
+# Stage 1: Single Model Proxy (Declarative Model Routing Config)
+# - Deterministic 1:1 Feature Heuristic:
+#     `openai/gpt-4o` -> `demo/target-openai-gpt-4o.yaml`
+# - rpm: Requests Per Minute limit
+# - tpm: Tokens Per Minute limit (prompt + completion tokens from $.usage.total_tokens)
+
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 2
+      tpm: 40000

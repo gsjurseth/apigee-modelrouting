@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<AssignMessage async="false" continueOnError="false" enabled="true" name="AM-PrimaryResponse">
+    <DisplayName>AM-PrimaryResponse</DisplayName>
+    <Set>
+        <Headers>
+            <Header name="Content-Type">application/json</Header>
+            <Header name="x-backend-model">primary-model-gpt4o</Header>
+            <Header name="x-backend-provider">mock-primary-openai</Header>
+            <Header name="x-ratelimit-remaining">{ratelimit.Q-PrimaryQuota.available.count}</Header>
+        </Headers>
+        <Payload contentType="application/json">{
+  "id": "chatcmpl-primary-demo-01",
+  "object": "chat.completion",
+  "created": 1730623300,
+  "model": "primary-model-gpt4o",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! This is a response from the Primary LLM backend (OpenAI format). The model is healthy and serving within quota."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 14,
+    "completion_tokens": 24,
+    "total_tokens": 38
+  }
+}</Payload>
+        <StatusCode>200</StatusCode>
+    </Set>
+    <IgnoreUnresolvedVariables>true</IgnoreUnresolvedVariables>
+    <AssignTo createNew="false" transport="http" type="response"/>
+</AssignMessage>

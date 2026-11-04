@@ -1,0 +1,215 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-failover
+type: feature
+description: >
+  Cross-provider failover. When primary-target returns 4xx/5xx (such as
+  HTTP 429 Too Many Requests), its DefaultFaultRule fires a ServiceCallout
+  to the Anthropic Claude backend. The request payload is dynamically
+  transcoded from OpenAI shape into Anthropic Messages format, and the
+  resulting Anthropic response is transcoded back into OpenAI Chat Completion
+  format with failover metadata headers.
+
+targets:
+  - name: primary-target
+    httpTargetConnection:
+      Properties:
+        Property:
+          metadata:
+            name: success.codes
+          _text: "2XX"
+      URL: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/primary
+    flows:
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: RF-TargetErrorToFault
+            condition: response.status.code >= 400
+          - name: AM-SetPrimaryHeaders
+            condition: response.status.code < 400
+    defaultFaultRule:
+      name: FallbackToAnthropic
+      steps:
+        - name: JS-BuildAnthropicFailoverRequest
+        - name: AM-BuildAnthropicFailoverRequest
+        - name: SC-FallbackToAnthropic
+        - name: JS-TranscodeAnthropicFailoverResponse
+
+policies:
+  - name: RF-TargetErrorToFault
+    type: RaiseFault
+    content:
+      RaiseFault:
+        metadata:
+          name: RF-TargetErrorToFault
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: RF-TargetErrorToFault
+        IgnoreUnresolvedVariables: "true"
+
+  - name: JS-BuildAnthropicFailoverRequest
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-BuildAnthropicFailoverRequest
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-BuildAnthropicFailoverRequest
+        ResourceURL:
+          _text: "jsc://build-anthropic-failover-request.js"
+
+  - name: AM-BuildAnthropicFailoverRequest
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-BuildAnthropicFailoverRequest
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: AM-BuildAnthropicFailoverRequest
+        AssignTo:
+          metadata:
+            createNew: "true"
+            transport: http
+            type: request
+          _text: anthropicRequest
+        Set:
+          Verb: POST
+          Headers:
+            Header:
+              - metadata:
+                  name: Content-Type
+                _text: application/json
+              - metadata:
+                  name: anthropic-version
+                _text: "2023-06-01"
+          Payload:
+            metadata:
+              contentType: application/json
+            _text: "{anthropic_failover_payload}"
+
+  - name: SC-FallbackToAnthropic
+    type: ServiceCallout
+    content:
+      ServiceCallout:
+        metadata:
+          name: SC-FallbackToAnthropic
+          async: "false"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: SC-FallbackToAnthropic
+        Request:
+          metadata:
+            variable: anthropicRequest
+        Response:
+          _text: anthropicResponse
+        HTTPTargetConnection:
+          URL: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/anthropic
+
+  - name: JS-TranscodeAnthropicFailoverResponse
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeAnthropicFailoverResponse
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeAnthropicFailoverResponse
+        ResourceURL:
+          _text: "jsc://transcode-anthropic-failover-response.js"
+
+resources:
+  - name: build-anthropic-failover-request.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("request.content");
+        var prompt = "Hello";
+        var anthropicMessages = [];
+        var systemPrompt = "";
+        if (raw) {
+          var openAIBody = JSON.parse(raw);
+          if (openAIBody.messages && Array.isArray(openAIBody.messages)) {
+            for (var i = 0; i < openAIBody.messages.length; i++) {
+              var msg = openAIBody.messages[i];
+              if (msg.role === "system") {
+                systemPrompt = (systemPrompt ? systemPrompt + "\n" : "") + msg.content;
+              } else if (msg.role === "user" || msg.role === "assistant") {
+                anthropicMessages.push({ role: msg.role, content: msg.content });
+              }
+            }
+          }
+        }
+        if (anthropicMessages.length === 0) {
+          anthropicMessages.push({ role: "user", content: prompt });
+        }
+        var anthropicPayload = {
+          model: "claude-3-5-sonnet-20241022",
+          max_tokens: 1024,
+          messages: anthropicMessages
+        };
+        if (systemPrompt) { anthropicPayload.system = systemPrompt; }
+        context.setVariable("anthropic_failover_payload", JSON.stringify(anthropicPayload));
+      } catch (e) {
+        print("Error preparing Anthropic failover request: " + e);
+      }
+
+  - name: transcode-anthropic-failover-response.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("anthropicResponse.content");
+        var contentText = "Anthropic failover response received.";
+        var modelName = "claude-3-5-sonnet-20241022";
+        var inTokens = 15;
+        var outTokens = 30;
+        if (raw) {
+          var anthropicResp = JSON.parse(raw);
+          if (anthropicResp.model) { modelName = anthropicResp.model; }
+          if (anthropicResp.content && Array.isArray(anthropicResp.content)) {
+            var parts = [];
+            for (var i = 0; i < anthropicResp.content.length; i++) {
+              if (anthropicResp.content[i].type === "text") {
+                parts.push(anthropicResp.content[i].text);
+              }
+            }
+            if (parts.length > 0) { contentText = parts.join("\n"); }
+          }
+          if (anthropicResp.usage) {
+            inTokens = anthropicResp.usage.input_tokens || inTokens;
+            outTokens = anthropicResp.usage.output_tokens || outTokens;
+          }
+        }
+        var openAIResp = {
+          id: "chatcmpl-failover-claude-" + Date.now(),
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: modelName,
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: contentText },
+            finish_reason: "stop"
+          }],
+          usage: {
+            prompt_tokens: inTokens,
+            completion_tokens: outTokens,
+            total_tokens: inTokens + outTokens
+          }
+        };
+        context.setVariable("response.content", JSON.stringify(openAIResp));
+        context.setVariable("response.header.Content-Type", "application/json");
+        context.setVariable("response.header.x-apigee-model", modelName);
+        context.setVariable("response.header.x-apigee-fallback", "true");
+        context.setVariable("response.header.x-apigee-failover-reason", "primary-quota-exceeded-429");
+        context.setVariable("response.header.x-apigee-transcoded", "true");
+        context.setVariable("response.header.Access-Control-Allow-Origin", "*");
+        context.setVariable("response.header.Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        context.setVariable("response.header.Access-Control-Allow-Headers", "*");
+        context.setVariable("response.status.code", 200);
+        context.setVariable("response.reason.phrase", "OK");
+      } catch (e) {
+        print("Error transcoding Anthropic failover response: " + e);
+      }

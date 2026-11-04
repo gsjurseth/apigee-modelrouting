@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Javascript async="false" continueOnError="false" enabled="true" name="JS-ClassifyPromptIntent">
+    <DisplayName>JS-ClassifyPromptIntent</DisplayName>
+    <Properties/>
+    <ResourceURL>jsc://classify-prompt-intent.js</ResourceURL>
+</Javascript>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<AssignMessage async="false" continueOnError="false" enabled="true" name="AM-GeminiResponse">
+    <DisplayName>AM-GeminiResponse</DisplayName>
+    <Set>
+        <Headers>
+            <Header name="Content-Type">application/json</Header>
+            <Header name="x-backend-model">gemini-2.5-flash</Header>
+            <Header name="x-backend-provider">google-vertex-ai</Header>
+        </Headers>
+        <Payload contentType="application/json">{
+  "id": "chatcmpl-gemini-25-flash-01",
+  "object": "chat.completion",
+  "created": 1730623300,
+  "model": "gemini-2.5-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello from Google Gemini 2.5 Flash (Tier-1 Low-Cost Model)! Apigee Semantic Router classified your prompt (\"{gemini.user_prompt}\") as SIMPLE_QA via gemini-2.5-flash-lite and routed it here at 20x lower token cost."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 14,
+    "completion_tokens": 28,
+    "total_tokens": 42
+  }
+}</Payload>
+        <StatusCode>200</StatusCode>
+    </Set>
+    <IgnoreUnresolvedVariables>true</IgnoreUnresolvedVariables>
+    <AssignTo createNew="false" transport="http" type="response"/>
+</AssignMessage>

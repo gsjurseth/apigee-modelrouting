@@ -1,0 +1,81 @@
+# Stage 5: Enterprise Router & Guardrails (Semantic Cache, Model Armor, Retries & Ordered Fallbacks)
+# - router_settings: latency-based routing, retries/cooldowns, ordered fallback priority chain,
+#   context-window overflow fallbacks, and content-policy fallbacks
+# - gateway_settings: Vertex Vector Search Semantic Cache (`llm-semantic-cache.yaml`) and
+#   Google Cloud Model Armor prompt/response sanitization (`llm-model-armor.yaml`)
+
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 2
+      tpm: 40000
+
+  - model_name: gemini-2.5-flash
+    model_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: apigee-product-demo
+      vertex_location: us-central1
+      rpm: 1000
+      tpm: 2000000
+
+  - model_name: claude-3-5-sonnet
+    model_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 50
+      tpm: 200000
+
+  - model_name: llama-3.3-70b
+    model_params:
+      model: bedrock/llama-3.3-70b-instruct
+      aws_region_name: us-east-1
+      rpm: 100
+      tpm: 300000
+
+  - model_name: command-r-plus
+    model_params:
+      model: cohere/command-r-plus-08-2024
+      api_key: os.environ/COHERE_API_KEY
+      rpm: 100
+      tpm: 250000
+
+  - model_name: mistral-large
+    model_params:
+      model: mistral/mistral-large-2411
+      api_key: os.environ/MISTRAL_API_KEY
+      rpm: 100
+      tpm: 250000
+
+router_settings:
+  routing_strategy: latency-based-routing
+  num_retries: 2
+  retry_after: 1
+  timeout: 30
+  cooldown_time: 60
+  # Ordered Fallback Priority Chain (Priority 1 -> Priority 2 -> Priority 3)
+  fallbacks:
+    - gpt-4o:
+        - claude-3-5-sonnet
+        - gemini-2.5-flash
+        - llama-3.3-70b
+  # Context-Window Overflow Fallback (>128k tokens routes to Gemini 1M context window)
+  context_window_fallbacks:
+    - gpt-4o: ["gemini-2.5-flash"]
+  # Content-Policy / Guardrail Fallback
+  content_policy_fallbacks:
+    - gpt-4o: ["claude-3-5-sonnet"]
+
+gateway_settings:
+  drop_params: true
+  semantic_cache:
+    enabled: true
+    embedding_model: vertex_ai/text-embedding-005
+    similarity_threshold: 0.90
+    ttl_seconds: 3600
+  model_armor:
+    enabled: true
+    template_id: projects/apigee-product-demo/locations/us-central1/templates/enterprise-ai-safety
+    sanitize_prompt: true
+    sanitize_response: true

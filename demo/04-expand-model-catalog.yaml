@@ -1,0 +1,22 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: aft-demo-simple-04
+description: >
+  Stage 4 -- Scale to Multi-Cloud Enterprise Catalog + Auto-Synthesize
+  Brand-New Model Feature (compiled from Model Routing config). Onboards
+  OpenAI GPT-4o, Vertex Gemini 2.5 Flash, Anthropic Claude 3.5 Sonnet, AWS
+  Bedrock Llama 3.3 70B, Cohere Command R+, Mistral Large 2411, and
+  auto-synthesizes DeepSeek R1 (target-deepseek-reasoner.yaml).
+features:
+  - llm-base.yaml
+  - llm-openai-format.yaml
+  - target-openai-gpt-4o.yaml
+  - target-vertex-ai-gemini-2.5-flash.yaml
+  - target-anthropic-claude-3-5-sonnet-20241022.yaml
+  - target-bedrock-llama-3.3-70b-instruct.yaml
+  - target-cohere-command-r-plus-08-2024.yaml
+  - target-mistral-large-2411.yaml
+  - target-deepseek-reasoner.yaml
+parameters:
+  - name: BASE_PATH
+    default: /v1/chat/simple-stage4

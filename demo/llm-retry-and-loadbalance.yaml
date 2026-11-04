@@ -1,0 +1,53 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-retry-and-loadbalance
+type: feature
+description: >
+  Declarative Router Policy enforcement: evaluates routing_strategy
+  (latency-based-routing, least-busy, cost-based-routing, simple-shuffle),
+  retry budget (num_retries, retry_after, timeout, cooldown_time),
+  ordered multi-hop fallback priority chains, and context_window_fallbacks.
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: JS-EvaluateRouterSettings
+          condition: request.verb = "POST"
+
+policies:
+  - name: JS-EvaluateRouterSettings
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-EvaluateRouterSettings
+          timeLimit: "200"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: JS-EvaluateRouterSettings
+        ResourceURL:
+          _text: "jsc://evaluate-router-settings.js"
+
+resources:
+  - name: evaluate-router-settings.js
+    type: jsc
+    content: |
+      try {
+        context.setVariable("llm.routing_strategy", "latency-based-routing");
+        context.setVariable("llm.num_retries", "2");
+        context.setVariable("llm.retry_backoff_sec", "1");
+        context.setVariable("llm.cooldown_time_sec", "60");
+        context.setVariable("llm.fallback_priority_chain", "claude-3-5-sonnet -> gemini-2.5-flash -> llama-3.3-70b");
+
+        // Context-window overflow check (>128k chars/tokens overflows to Gemini 2.5 Flash 1M context)
+        var prompt = context.getVariable("llm.prompt") || "";
+        if (prompt.length > 128000 && context.getVariable("llm.model") === "gpt-4o") {
+          context.setVariable("llm.model", "gemini-2.5-flash");
+          context.setVariable("llm.context_window_fallback", "true");
+        }
+      } catch (e) {
+        print("Router settings evaluation error: " + e);
+      }

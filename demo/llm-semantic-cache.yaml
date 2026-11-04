@@ -1,0 +1,89 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-semantic-cache
+type: feature
+description: >
+  Vertex Vector Search-backed semantic cache. On PreFlow.Request,
+  SemanticCacheLookup embeds `{llm.prompt}` with Vertex AI text-embedding-005
+  and queries the Vector Search index endpoint; on a cosine similarity hit >=
+  THRESHOLD, the cached completion is returned immediately. On PostFlow.Response,
+  SemanticCachePopulate upserts the response with TTL_SECONDS lifetime.
+
+parameters:
+  - name: EMBEDDINGS_LOCATION
+    default: us-central1
+  - name: EMBEDDINGS_MODEL
+    default: text-embedding-005
+  - name: VECTOR_INDEX_ENDPOINT_ID
+    default: "apigee-semantic-cache-endpoint"
+  - name: VECTOR_INDEX_ID
+    default: "apigee-semantic-cache-index"
+  - name: VECTOR_INDEX_ENDPOINT_SUBDOMAIN
+    default: "1000000000"
+  - name: PROJECT_NUMBER
+    default: "123456789012"
+  - name: DEPLOYED_INDEX_ID
+    default: "apigee_semantic_cache_deployed"
+  - name: THRESHOLD
+    default: "0.90"
+  - name: TTL_SECONDS
+    default: "3600"
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: SCLLookup
+          condition: request.verb = "POST"
+    - name: PostFlow
+      mode: Response
+      steps:
+        - name: SCPPopulate
+          condition: "request.verb = \"POST\" and 'SemanticCacheLookup.llm-semantic-cache-SCLLookup.cache_hit' is false"
+
+policies:
+  - name: SCLLookup
+    type: SemanticCacheLookup
+    content:
+      SemanticCacheLookup:
+        metadata:
+          name: SCLLookup
+          async: "false"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: SCLLookup
+        IgnoreUnresolvedVariables: "true"
+        UserPromptSource:
+          _text: "{llm.prompt}"
+        Embeddings:
+          VertexAI:
+            URL:
+              _text: "https://{EMBEDDINGS_LOCATION}-aiplatform.googleapis.com/v1/projects/{organization.name}/locations/{EMBEDDINGS_LOCATION}/publishers/google/models/{EMBEDDINGS_MODEL}:predict"
+        SimilaritySearch:
+          VertexAI:
+            URL:
+              _text: "https://{VECTOR_INDEX_ENDPOINT_SUBDOMAIN}.{EMBEDDINGS_LOCATION}-{PROJECT_NUMBER}.vdb.vertexai.goog/v1/projects/{organization.name}/locations/{EMBEDDINGS_LOCATION}/indexEndpoints/{VECTOR_INDEX_ENDPOINT_ID}:findNeighbors"
+            DeployedIndexID:
+              _text: "{DEPLOYED_INDEX_ID}"
+            Threshold:
+              _text: "{THRESHOLD}"
+
+  - name: SCPPopulate
+    type: SemanticCachePopulate
+    content:
+      SemanticCachePopulate:
+        metadata:
+          name: SCPPopulate
+          async: "false"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: SCPPopulate
+        IgnoreUnresolvedVariables: "true"
+        SimilaritySearch:
+          VertexAI:
+            URL:
+              _text: "https://{EMBEDDINGS_LOCATION}-aiplatform.googleapis.com/v1/projects/{organization.name}/locations/{EMBEDDINGS_LOCATION}/indexes/{VECTOR_INDEX_ID}:upsertDatapoints"
+        TTLInSeconds:
+          _text: "{TTL_SECONDS}"

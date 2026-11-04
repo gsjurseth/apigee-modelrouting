@@ -1,0 +1,86 @@
+# Stage 6: Semantic / Complexity Auto-Router + Enterprise Guardrails
+# - `auto_router/complexity_router` compiles to `llm-semantic-router.yaml`
+#   (SC-ClassifyPromptIntent via gemini-2.5-flash-lite)
+# - Combines intelligent tier routing with Semantic Cache, Model Armor, and ordered Fallbacks
+
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 500
+      tpm: 800000
+
+  - model_name: gemini-2.5-flash
+    model_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: apigee-product-demo
+      vertex_location: us-central1
+      rpm: 1000
+      tpm: 2000000
+
+  - model_name: claude-3-5-sonnet
+    model_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 50
+      tpm: 200000
+
+  - model_name: llama-3.3-70b
+    model_params:
+      model: bedrock/llama-3.3-70b-instruct
+      aws_region_name: us-east-1
+      rpm: 100
+      tpm: 300000
+
+  - model_name: command-r-plus
+    model_params:
+      model: cohere/command-r-plus-08-2024
+      api_key: os.environ/COHERE_API_KEY
+      rpm: 100
+      tpm: 250000
+
+  - model_name: mistral-large
+    model_params:
+      model: mistral/mistral-large-2411
+      api_key: os.environ/MISTRAL_API_KEY
+      rpm: 100
+      tpm: 250000
+
+  # Auto Router (complexity & intent classifier)
+  - model_name: auto
+    model_params:
+      model: auto_router/complexity_router
+      drop_params: true
+    complexity_router_config:
+      classifier_model: vertex_ai/gemini-2.5-flash-lite
+      tiers:
+        SIMPLE_QA: ["gemini-2.5-flash"]
+        CODING: ["claude-3-5-sonnet"]
+        COMPLEX_REASONING: ["gpt-4o"]
+
+router_settings:
+  routing_strategy: latency-based-routing
+  num_retries: 2
+  retry_after: 1
+  timeout: 30
+  cooldown_time: 60
+  fallbacks:
+    - gpt-4o:
+        - claude-3-5-sonnet
+        - gemini-2.5-flash
+  context_window_fallbacks:
+    - gpt-4o: ["gemini-2.5-flash"]
+
+gateway_settings:
+  drop_params: true
+  semantic_cache:
+    enabled: true
+    embedding_model: vertex_ai/text-embedding-005
+    similarity_threshold: 0.90
+    ttl_seconds: 3600
+  model_armor:
+    enabled: true
+    template_id: projects/apigee-product-demo/locations/us-central1/templates/enterprise-ai-safety
+    sanitize_prompt: true
+    sanitize_response: true

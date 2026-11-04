@@ -1,0 +1,133 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: target-anthropic-claude-3-5-sonnet-20241022
+type: feature
+description: >
+  Anthropic Claude 3.5 Sonnet (`anthropic/claude-3-5-sonnet-20241022`) model
+  target feature. Self-registers the `claude` route rule (`claude-3-5-sonnet`,
+  `claude-3-5-sonnet-20241022`, `claude-*`, or `anthropic/*`), configures
+  `anthropic-target`, and encapsulates bidirectional payload transcoding
+  (OpenAI Chat Completions <-> Anthropic Messages v1) pinned to
+  `claude-3-5-sonnet-20241022`.
+
+defaultEndpoint:
+  name: default
+  routes:
+    - name: claude
+      condition: llm.model = "claude-3-5-sonnet" or llm.model = "claude-3-5-sonnet-20241022" or llm.model StartsWith "claude" or llm.model StartsWith "anthropic"
+      target: anthropic-target
+
+targets:
+  - name: anthropic-target
+    url: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/anthropic
+    flows:
+      - name: PreFlow
+        mode: Request
+        steps:
+          - name: JS-TranscodeOpenAIToAnthropic
+      - name: PostFlow
+        mode: Response
+        steps:
+          - name: JS-TranscodeAnthropicToOpenAI
+
+policies:
+  - name: JS-TranscodeOpenAIToAnthropic
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeOpenAIToAnthropic
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeOpenAIToAnthropic
+        ResourceURL:
+          _text: "jsc://transcode-openai-to-anthropic.js"
+
+  - name: JS-TranscodeAnthropicToOpenAI
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-TranscodeAnthropicToOpenAI
+          timeLimit: "200"
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: JS-TranscodeAnthropicToOpenAI
+        ResourceURL:
+          _text: "jsc://transcode-anthropic-to-openai.js"
+
+resources:
+  - name: transcode-openai-to-anthropic.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("request.content");
+        if (raw) {
+          var openAIBody = JSON.parse(raw);
+          var anthropicMessages = [];
+          var systemPrompt = "";
+          if (openAIBody.messages && Array.isArray(openAIBody.messages)) {
+            for (var i = 0; i < openAIBody.messages.length; i++) {
+              var msg = openAIBody.messages[i];
+              if (msg.role === "system") {
+                systemPrompt = (systemPrompt ? systemPrompt + "\n" : "") + msg.content;
+              } else if (msg.role === "user" || msg.role === "assistant") {
+                anthropicMessages.push({ role: msg.role, content: msg.content });
+              }
+            }
+          }
+          var anthropicBody = {
+            model: "claude-3-5-sonnet-20241022",
+            max_tokens: openAIBody.max_tokens || 1024,
+            messages: anthropicMessages
+          };
+          if (systemPrompt) { anthropicBody.system = systemPrompt; }
+          context.setVariable("request.content", JSON.stringify(anthropicBody));
+          context.setVariable("request.header.Content-Type", "application/json");
+          context.setVariable("request.header.anthropic-version", "2023-06-01");
+        }
+      } catch (e) {
+        print("Error transcoding OpenAI to Anthropic: " + e);
+      }
+
+  - name: transcode-anthropic-to-openai.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("response.content");
+        if (raw) {
+          var anthropicResp = JSON.parse(raw);
+          var contentText = "";
+          if (anthropicResp.content && Array.isArray(anthropicResp.content)) {
+            for (var i = 0; i < anthropicResp.content.length; i++) {
+              if (anthropicResp.content[i].type === "text") {
+                contentText += anthropicResp.content[i].text;
+              }
+            }
+          }
+          var openAIResp = {
+            id: "chatcmpl-" + (anthropicResp.id || "claude-transcoded"),
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: anthropicResp.model || "claude-3-5-sonnet-20241022",
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: contentText },
+              finish_reason: "stop"
+            }],
+            usage: {
+              prompt_tokens: (anthropicResp.usage && anthropicResp.usage.input_tokens) || 15,
+              completion_tokens: (anthropicResp.usage && anthropicResp.usage.output_tokens) || 30,
+              total_tokens: 45
+            }
+          };
+          context.setVariable("response.content", JSON.stringify(openAIResp));
+          context.setVariable("response.header.Content-Type", "application/json");
+          context.setVariable("response.header.x-apigee-model", anthropicResp.model || "claude-3-5-sonnet-20241022");
+          context.setVariable("response.header.x-apigee-transcoded", "true");
+          context.setVariable("response.header.x-apigee-provider", "anthropic");
+        }
+      } catch (e) {
+        print("Error transcoding Anthropic to OpenAI: " + e);
+      }

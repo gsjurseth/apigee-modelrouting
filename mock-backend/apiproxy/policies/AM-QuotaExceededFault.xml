@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<AssignMessage async="false" continueOnError="false" enabled="true" name="AM-QuotaExceededFault">
+    <DisplayName>AM-QuotaExceededFault</DisplayName>
+    <Set>
+        <Headers>
+            <Header name="Content-Type">application/json</Header>
+            <Header name="x-backend-provider">mock-primary-openai</Header>
+            <Header name="Retry-After">60</Header>
+        </Headers>
+        <Payload contentType="application/json">{
+  "error": {
+    "code": 429,
+    "message": "Rate limit quota violation: Primary LLM backend quota exceeded (2 requests/minute). Please slow down or switch models.",
+    "status": "RESOURCE_EXHAUSTED",
+    "type": "insufficient_quota"
+  }
+}</Payload>
+        <StatusCode>429</StatusCode>
+        <ReasonPhrase>Too Many Requests</ReasonPhrase>
+    </Set>
+    <IgnoreUnresolvedVariables>true</IgnoreUnresolvedVariables>
+    <AssignTo createNew="false" transport="http" type="response"/>
+</AssignMessage>

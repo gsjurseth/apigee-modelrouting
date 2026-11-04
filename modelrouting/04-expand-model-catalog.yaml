@@ -1,0 +1,62 @@
+# Stage 4: Multi-Cloud Enterprise Catalog + Brand-New Model Onboarding
+# - Deterministic 1:1 Feature Heuristic (`<provider>/<model-version>` -> `target-<provider>-<model-version>.yaml`):
+#     `openai/gpt-4o`                        -> `demo/target-openai-gpt-4o.yaml`
+#     `vertex_ai/gemini-2.5-flash`           -> `demo/target-vertex-ai-gemini-2.5-flash.yaml`
+#     `anthropic/claude-3-5-sonnet-20241022` -> `demo/target-anthropic-claude-3-5-sonnet-20241022.yaml`
+#     `bedrock/llama-3.3-70b-instruct`       -> `demo/target-bedrock-llama-3.3-70b-instruct.yaml`
+#     `cohere/command-r-plus-08-2024`        -> `demo/target-cohere-command-r-plus-08-2024.yaml`
+#     `mistral/mistral-large-2411`           -> `demo/target-mistral-large-2411.yaml`
+#     `deepseek/deepseek-reasoner`           -> `demo/target-deepseek-reasoner.yaml` (auto-synthesized!)
+
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 2
+      tpm: 40000
+
+  - model_name: gemini-2.5-flash
+    model_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: apigee-product-demo
+      vertex_location: us-central1
+      rpm: 1000
+      tpm: 2000000
+
+  - model_name: claude-3-5-sonnet
+    model_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 50
+      tpm: 200000
+
+  - model_name: llama-3.3-70b
+    model_params:
+      model: bedrock/llama-3.3-70b-instruct
+      aws_region_name: us-east-1
+      rpm: 100
+      tpm: 300000
+
+  - model_name: command-r-plus
+    model_params:
+      model: cohere/command-r-plus-08-2024
+      api_key: os.environ/COHERE_API_KEY
+      rpm: 100
+      tpm: 250000
+
+  - model_name: mistral-large
+    model_params:
+      model: mistral/mistral-large-2411
+      api_key: os.environ/MISTRAL_API_KEY
+      rpm: 100
+      tpm: 250000
+
+  # Brand-new model onboarded by adding 6 lines (auto-synthesizes `demo/target-deepseek-reasoner.yaml`!)
+  - model_name: deepseek-r1
+    model_params:
+      model: deepseek/deepseek-reasoner
+      api_base: https://api.deepseek.com/v1/chat/completions
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 200
+      tpm: 500000

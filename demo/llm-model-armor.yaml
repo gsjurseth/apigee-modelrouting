@@ -1,0 +1,68 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-model-armor
+type: feature
+description: >
+  Wraps the LLM request and response with Google Cloud Model Armor prompt and
+  response sanitization (prompt injection, jailbreak, PII redaction, and RAI
+  filters). SanitizeUserPrompt runs on PreFlow.Request; SanitizeModelResponse
+  runs on PostFlow.Response.
+
+parameters:
+  - name: MA_TEMPLATE_PATH
+    displayName: Model Armor template resource path
+    description: >
+      Fully-qualified resource path of the Model Armor template.
+      Format: projects/{project}/locations/{location}/templates/{id}
+    default: projects/{organization.name}/locations/us-central1/templates/enterprise-ai-safety
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: MA-SanitizeUserPrompt
+          condition: request.verb = "POST"
+    - name: PostFlow
+      mode: Response
+      steps:
+        - name: MA-SanitizeModelResponse
+          condition: request.verb = "POST"
+
+policies:
+  - name: MA-SanitizeUserPrompt
+    type: SanitizeUserPrompt
+    content:
+      SanitizeUserPrompt:
+        metadata:
+          name: MA-SanitizeUserPrompt
+          async: "false"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: MA-SanitizeUserPrompt
+        IgnoreUnresolvedVariables: "true"
+        ModelArmor:
+          TemplateName:
+            _text: "{MA_TEMPLATE_PATH}"
+        UserPromptSource:
+          _text: "{llm.prompt}"
+
+  - name: MA-SanitizeModelResponse
+    type: SanitizeModelResponse
+    content:
+      SanitizeModelResponse:
+        metadata:
+          name: MA-SanitizeModelResponse
+          async: "false"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: MA-SanitizeModelResponse
+        IgnoreUnresolvedVariables: "true"
+        ModelArmor:
+          TemplateName:
+            _text: "{MA_TEMPLATE_PATH}"
+        UserPromptSource:
+          _text: "{llm.prompt}"
+        LLMResponseSource:
+          _text: "{jsonPath('$.choices[-1].message.content',response.content,true)}"

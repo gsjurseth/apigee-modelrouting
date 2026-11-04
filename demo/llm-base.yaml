@@ -1,0 +1,22 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-base
+type: feature
+description: >
+  Base proxy skeleton for AI Gateway demo. Defines the default
+  ProxyEndpoint bound to the parameterized BASE_PATH with a route
+  to the primary target and a no-target route for CORS preflights.
+
+parameters:
+  - name: BASE_PATH
+    displayName: Proxy base path
+    default: /v1/chat/completions
+
+endpoints:
+  - name: default
+    basePath: "{BASE_PATH}"
+    routes:
+      - name: no-target-options
+        condition: request.verb = "OPTIONS"
+      - name: primary
+        target: primary-target
