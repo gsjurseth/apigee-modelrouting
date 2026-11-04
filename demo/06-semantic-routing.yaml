@@ -2,13 +2,15 @@ gateway: apigee
 schemaVersion: 1.0.0
 name: aft-demo-semantic-router
 description: >
-  Stage 6 -- Semantic Model Routing Gateway + Enterprise Guardrails
-  (compiled from Model Routing config). Maps auto_router/complexity_router
-  to llm-semantic-router.yaml alongside Semantic Cache and Model Armor.
+  Stage 6 -- Semantic Model Routing Gateway + Enterprise Guardrails & Token
+  Analytics (compiled from Model Routing config). Maps
+  auto_router/complexity_router to llm-semantic-router.yaml alongside KVM
+  Auth, Semantic Cache, Model Armor, and DataCollector.
 features:
   - llm-base.yaml
   - llm-cors.yaml
   - llm-openai-format.yaml
+  - llm-auth-kvm.yaml
   - llm-model-armor.yaml
   - llm-semantic-cache.yaml
   - llm-retry-and-loadbalance.yaml
@@ -20,9 +22,12 @@ features:
   - target-cohere-command-r-plus-08-2024.yaml
   - target-mistral-large-2411.yaml
   - llm-failover.yaml
+  - llm-token-analytics.yaml
 parameters:
   - name: BASE_PATH
     default: /v1/chat/semantic-router
+  - name: KVM_MAP_NAME
+    default: llm-provider-credentials
   - name: MA_TEMPLATE_PATH
     default: projects/apigee-product-demo/locations/us-central1/templates/enterprise-ai-safety
   - name: THRESHOLD

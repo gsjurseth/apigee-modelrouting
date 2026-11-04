@@ -3,8 +3,8 @@ schemaVersion: 1.0.0
 name: aft-demo-simple-02
 description: >
   Stage 2 -- Onboard Google Vertex AI Gemini 2.5 Flash (compiled from Model
-  Routing config). Adds target-vertex-ai-gemini-2.5-flash.yaml via
-  deterministic 1:1 model heuristic.
+  Routing config). Adds target-vertex-ai-gemini-2.5-flash.yaml with
+  GoogleAccessToken Service Account auth.
 features:
   - llm-base.yaml
   - llm-openai-format.yaml

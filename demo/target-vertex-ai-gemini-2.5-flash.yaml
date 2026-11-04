@@ -4,9 +4,11 @@ name: target-vertex-ai-gemini-2.5-flash
 type: feature
 description: >
   Google Vertex AI Gemini 2.5 Flash (`vertex_ai/gemini-2.5-flash`) model target
-  feature. Self-registers the `gemini-2-5-flash` route rule on the default
-  ProxyEndpoint (`gemini-2.5-flash`, `gemini-*`, or `vertex_ai/gemini-2.5-flash`)
-  and configures `gemini-target` with model-specific telemetry headers.
+  feature. Self-registers the `gemini` route rule on the default ProxyEndpoint
+  (`gemini-2.5-flash`, `gemini-*`, or `vertex_ai/gemini-2.5-flash`), configures
+  `gemini-target` with native `GoogleAccessToken` IAM authentication (minting
+  OAuth 2.0 tokens automatically from the proxy's attached GCP Service Account),
+  and sets model telemetry headers.
 
 defaultEndpoint:
   name: default
@@ -18,6 +20,9 @@ defaultEndpoint:
 targets:
   - name: gemini-target
     url: https://api.endpoints.apigee-product-demo.cloud.goog/mock-llm/gemini
+    auth: GoogleAccessToken
+    scopes:
+      - https://www.googleapis.com/auth/cloud-platform
     flows:
       - name: PostFlow
         mode: Response

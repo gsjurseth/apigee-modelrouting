@@ -1,91 +1,230 @@
 # Apigee Model Routing (`apigee-modelrouting`)
 
-A declarative **Model Routing compiler (`./apigee-modelrouting`)** and progressive **Apigee Feature Templates (AFT)** reference architecture for building an enterprise AI Gateway on Google Cloud Apigee.
+**`apigee-modelrouting`** is a declarative **Model Routing compiler and CLI toolkit for AI Practitioners** building enterprise AI Gateways on Google Cloud Apigee.
 
-Instead of authoring raw Apigee XML bundles or manually wiring proxy templates, developers declare a concise `modelrouting/*.yaml` configuration (`model_list`, `router_settings`, and `gateway_settings`), and `./apigee-modelrouting` deterministically compiles it into modular, version-pinned **Apigee Feature Templates (`demo/*.yaml`)** ready to import via `gcloud beta apigee apis import`.
+AI engineers and platform teams are accustomed to defining model catalogs, token/request quotas (`rpm`, `tpm`), retry policies, ordered fallback chains, and safety guardrails in concise YAML configurations (similar to LiteLLM proxy configs) rather than hand-crafting Apigee XML policy bundles. **`apigee-modelrouting`** bridges that gap: you write a clean declarative Model Routing YAML (`model_list`, `router_settings`, `gateway_settings`), and the compiler deterministically translates it into modular, version-pinned **Apigee Feature Templates (AFT)** ready to deploy via `gcloud beta apigee apis import`.
+
+> 🎬 **Looking for the interactive 6-stage demo playbook?** See **[`EXAMPLE_DEMO.md`](EXAMPLE_DEMO.md)** for the step-by-step presenter walkthrough, live failover & semantic routing scripts, and the 2-tab web dashboard.
+
+---
+
+## ✨ Key Capabilities for AI Practitioners
+
+1. **Deterministic 1:1 Model-to-Feature Heuristic**: Every `model_params.model` string (`<provider>/<model-version>`) maps 1:1 with zero lookup table to a self-evident, version-pinned AFT feature (`demo/target-<provider>-<model-version>.yaml`) that encapsulates routing, endpoint configuration, and bidirectional wire-format transcoding (OpenAI $\leftrightarrow$ Anthropic Messages, AWS Bedrock Converse, Cohere Chat).
+2. **On-the-Fly Feature Synthesis for New Models & Versions**: Reference any brand-new model provider (e.g., `deepseek/deepseek-reasoner`, `xai/grok-3-beta`) or a newly released model version (e.g., `vertex_ai/gemini-3.5-flash`, `anthropic/claude-3-7-sonnet-20250219`) in `model_list` (or via `./apigee-modelrouting add-model`), and the compiler automatically generates a ready-to-deploy `demo/target-<provider>-<model-version>.yaml` feature on the fly.
+3. **Enterprise Guardrails (`Model Armor` & `Semantic Cache`)**: Enable Google Cloud **Model Armor** prompt/response sanitization (`llm-model-armor.yaml`) and **Vertex AI Vector Search Semantic Caching** (`llm-semantic-cache.yaml`) directly from `gateway_settings`.
+4. **Resilient Routing (`Retries`, `Load Balancing`, & `Ordered Fallbacks`)**: Configure `routing_strategy`, `num_retries`, `cooldown_time`, multi-hop ordered `fallbacks` priority chains, `context_window_fallbacks`, and `content_policy_fallbacks` under `router_settings`.
+5. **Enterprise Auth Controls (`GCP Service Account IAM` + `Encrypted Apigee KVM Vault`)**:
+   - **Vertex AI Zero-Key IAM**: `vertex_ai/*` targets automatically configure `<Authentication><GoogleAccessToken>` to mint OAuth 2.0 tokens from the GCP Service Account bound to the Apigee proxy deployment.
+   - **Encrypted KVM Credential Vault**: Third-party `api_key: os.environ/<PROVIDER>_API_KEY` declarations compile to encrypted Apigee `KeyValueMapOperations` lookups (`llm-auth-kvm.yaml`) into masked `private.*` variables, paired with `./apigee-modelrouting sync-kvm` to provision your encrypted KVM.
+   - **Northbound Consumer Auth**: Optional `client_auth: api_key` compiles `VerifyAPIKey` (`llm-client-auth.yaml`) and strips consumer keys before forwarding southbound.
+6. **Automatic Token Breakdown & `DataCapture` Analytics (`prompt` vs. `cached` vs. `reasoning` tokens)**: Enabling `gateway_settings.token_analytics` compiles `llm-token-analytics.yaml`, normalizing token usage across OpenAI, Gemini, Anthropic, Bedrock, Cohere, and DeepSeek—explicitly separating **`prompt_tokens`**, **`completion_tokens`**, **`cached_tokens`** (context cache + semantic cache hits), and **`reasoning_tokens`** (thinking tokens)—into Apigee `DataCollector` metrics (`dc_llm_*`) for custom dashboards.
 
 ---
 
 ## 🧭 Deterministic 1:1 Model-to-Feature Heuristic
 
-Every model in `modelrouting/*.yaml` is referenced by a clean `<provider>/<model-version>` string and maps **1:1 with zero lookup table** to a self-evident, version-specific AFT feature file in `demo/`:
+Every model in `modelrouting/*.yaml` is referenced by a simple `<provider>/<model-version>` string and maps deterministically to its AFT feature filename:
 
 $$\texttt{model\_params.model: } \langle\text{provider}\rangle/\langle\text{model-version}\rangle \quad\Longleftrightarrow\quad \texttt{demo/target-}\langle\text{provider}\rangle\texttt{-}\langle\text{model-version}\rangle\texttt{.yaml}$$
 
-*(If `<model-version>` already starts with `<provider>-`, such as `mistral/mistral-large-2411` or `deepseek/deepseek-reasoner`, the duplicate prefix is collapsed to `target-mistral-large-2411.yaml` and `target-deepseek-reasoner.yaml`.)*
-
-```python
-def model_string_to_feature_filename(model_str: str) -> str:
-    provider, model_id = model_str.lower().split("/", 1)
-    p_slug = re.sub(r"[^a-z0-9.]+", "-", provider).strip("-")
-    m_slug = re.sub(r"[^a-z0-9.]+", "-", model_id).strip("-")
-    if m_slug.startswith(f"{p_slug}-"):
-        return f"target-{m_slug}.yaml"
-    return f"target-{p_slug}-{m_slug}.yaml"
-```
-
-### Model & Policy Feature Catalog (`modelrouting/*.yaml` $\rightarrow$ `demo/*.yaml`)
-
-Each model feature file does a **precise, self-evident** thing: it registers the `<RouteRule>` for that specific model version, configures its `<TargetEndpoint>`, and encapsulates version-pinned payload transcoding or normalization:
+*(When `<model-version>` already starts with `<provider>-`, such as `mistral/mistral-large-2411` or `deepseek/deepseek-reasoner`, the duplicate prefix is collapsed to `target-mistral-large-2411.yaml` and `target-deepseek-reasoner.yaml`.)*
 
 | `modelrouting/*.yaml` Reference | Compiled AFT Feature (`demo/*.yaml`) | Precise Version-Pinned Capability |
 | :--- | :--- | :--- |
-| *(Automatic base plumbing)* | `llm-base.yaml`, `llm-cors.yaml`, `llm-openai-format.yaml` | ProxyEndpoint skeleton, CORS preflight, OpenAI `$.model` & prompt extraction |
 | `openai/gpt-4o` | `target-openai-gpt-4o.yaml` | OpenAI **`gpt-4o`** TargetEndpoint + telemetry headers (`x-apigee-model: gpt-4o`) |
-| `vertex_ai/gemini-2.5-flash` | `target-vertex-ai-gemini-2.5-flash.yaml` | Vertex AI **`gemini-2.5-flash`** route rule + TargetEndpoint + `GoogleAccessToken` IAM auth |
+| `vertex_ai/gemini-2.5-flash` | `target-vertex-ai-gemini-2.5-flash.yaml` | Vertex AI **`gemini-2.5-flash`** route rule + TargetEndpoint + native **`GoogleAccessToken` Service Account IAM auth** |
 | `anthropic/claude-3-5-sonnet-20241022` | `target-anthropic-claude-3-5-sonnet-20241022.yaml` | Anthropic **`claude-3-5-sonnet-20241022`** route rule + **OpenAI $\leftrightarrow$ Anthropic Messages v1 transcoding** pinned to `claude-3-5-sonnet-20241022` |
 | `bedrock/llama-3.3-70b-instruct` | `target-bedrock-llama-3.3-70b-instruct.yaml` | AWS Bedrock **`llama-3.3-70b-instruct`** (`meta.llama3-3-70b-instruct-v1:0`) route rule + **OpenAI $\leftrightarrow$ Bedrock Converse API transcoding** |
 | `cohere/command-r-plus-08-2024` | `target-cohere-command-r-plus-08-2024.yaml` | Cohere **`command-r-plus-08-2024`** route rule + **OpenAI $\leftrightarrow$ Cohere Chat v1 transcoding** pinned to `command-r-plus-08-2024` |
 | `mistral/mistral-large-2411` | `target-mistral-large-2411.yaml` | Mistral **`mistral-large-2411`** route rule + TargetEndpoint + payload normalization pinned to `mistral-large-2411` |
-| `deepseek/deepseek-reasoner` *(or any new `<provider>/<version>`)* | `target-deepseek-reasoner.yaml` *(or `target-<provider>-<version>.yaml`)* | **Auto-Synthesized AFT Feature**: When a referenced feature file does not yet exist on disk (e.g. `vertex_ai/gemini-3.5-flash` or `deepseek/deepseek-reasoner`), `./apigee-modelrouting` synthesizes `demo/target-<provider>-<version>.yaml` automatically! |
-| `gateway_settings.model_armor` | `llm-model-armor.yaml` | `MA-SanitizeUserPrompt` (PreFlow) + `MA-SanitizeModelResponse` (PostFlow) |
-| `gateway_settings.semantic_cache` | `llm-semantic-cache.yaml` | `SCLLookup` (Vertex Vector Search cosine similarity) + `SCPPopulate` |
-| `router_settings` (retries / strategy) | `llm-retry-and-loadbalance.yaml` | Evaluates `routing_strategy`, `num_retries`, `cooldown_time`, & `context_window_fallbacks` |
-| `router_settings.fallbacks` | `llm-failover.yaml` | `DefaultFaultRule` catching `HTTP 429` / `5xx` + ordered priority failover & transcoding |
-| `model: auto_router/complexity_router` | `llm-semantic-router.yaml` | `PreFlow` `ServiceCallout` (`gemini-2.5-flash-lite`) classifying prompt intent & rewriting `llm.model` |
+| `deepseek/deepseek-reasoner` *(or any new `<provider>/<version>`)* | `target-deepseek-reasoner.yaml` *(or `target-<provider>-<version>.yaml`)* | **Auto-Synthesized on the Fly**: Generates `<RouteRule>`, `<TargetEndpoint>` (with `GoogleAccessToken` if `vertex_ai/*`), and version normalization JS |
 
 ---
 
-## 🎯 Progressive 6-Stage Walkthrough (3 Acts)
+## 🛠️ Practitioner Guide & Examples
 
-1. **Act 1: Progressive Model Onboarding & Automatic Feature Synthesis via CLI (Stages 1–5)**
-   - Step from **1 model** (`modelrouting/01-single-model.yaml`, with `rpm` & `tpm` quotas) to **7 models across clouds** (`modelrouting/04-expand-model-catalog.yaml`, which includes **DeepSeek-R1** `deepseek/deepseek-reasoner` — automatically synthesized into `demo/target-deepseek-reasoner.yaml`).
-   - Run `./apigee-modelrouting add-model` live to onboard a new model version (e.g., `vertex_ai/gemini-3.5-flash` $\rightarrow$ `demo/target-vertex-ai-gemini-3.5-flash.yaml` or `xai/grok-3-beta` $\rightarrow$ `demo/target-xai-grok-3-beta.yaml`) in one command.
-   - Show Stage 5 (`modelrouting/05-failover-gateway.yaml`), which adds **`router_settings`** (latency-based routing, retries, cooldowns, 3-tier ordered `fallbacks` priority chain, `context_window_fallbacks`) and **`gateway_settings`** (**Semantic Cache** + **Model Armor**).
-2. **Act 2: Live Demo A — Automated HTTP 429 Failover & Dynamic Transcoding (`Stage 5: aft-demo-simple-05`)**
-   - Step through Calls 1, 2, and 3 side-by-side in **Apigee Trace** and the **Web Dashboard** (`http://localhost:8080/index.html`): Calls 1 & 2 succeed on Primary `openai/gpt-4o` (2 req/min quota); Call 3 trips `HTTP 429`, which Apigee catches in `DefaultFaultRule`, dynamically transcodes to Anthropic Messages format, invokes Priority-1 fallback `anthropic/claude-3-5-sonnet-20241022`, transcodes back to OpenAI format, and returns `HTTP 200 OK`.
-3. **Act 3: Live Demo B — Semantic Model Routing via Flash-Lite Classifier (`Stage 6: aft-demo-semantic-router`)**
-   - Uses `modelrouting/06-semantic-routing.yaml` $\rightarrow$ `demo/06-semantic-routing.yaml` (`auto_router/complexity_router` $\rightarrow$ `llm-semantic-router.yaml`).
-   - Invokes `gemini-2.5-flash-lite` via `ServiceCallout` (`SC-ClassifyPromptIntent`) to classify prompt intent into `SIMPLE_QA`, `CODING`, or `COMPLEX_REASONING`, and dynamically rewrites `llm.model` to route to `gemini-2.5-flash`, `claude-3-5-sonnet-20241022` (with automatic transcoding), or `gpt-4o`.
+### 1. Deploying a Multi-Model Catalog with Built-In Features
 
----
+Create a declarative config (or use [`modelrouting/03-add-anthropic-claude.yaml`](modelrouting/03-add-anthropic-claude.yaml)) with OpenAI, Vertex AI Gemini, and Anthropic Claude, including per-model Requests Per Minute (`rpm`) and Tokens Per Minute (`tpm`) quotas:
 
-## 🚀 Quick Start
+```yaml
+model_list:
+  - model_name: gpt-4o
+    model_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 500
+      tpm: 800000
 
-```bash
-git clone https://github.com/gsjurseth/apigee-modelrouting.git
-cd apigee-modelrouting
+  - model_name: gemini-2.5-flash
+    model_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: my-gcp-project
+      vertex_location: us-central1
+      rpm: 1000
+      tpm: 2000000
 
-# Start the local interactive 2-tab demo dashboard on http://localhost:8080/index.html
-python3 server.py
+  - model_name: claude-3-5-sonnet
+    model_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 50
+      tpm: 200000
 ```
 
-- **Local Web Dashboard**: `http://localhost:8080/index.html`
-  - *(To point the dashboard at a custom Apigee gateway hostname, pass `?host=https://your-apigee-host.example.com` in the URL.)*
-- **Apigee Proxies (`APIGEE_ORG`, default `apigee-product-demo`, environment `dev-prog-proxy`)**:
-  - **Demo A Proxy to Trace**: `aft-demo-simple-05` (`/v1/chat/simple-stage5`)
-  - **Demo B Proxy to Trace**: `aft-demo-semantic-router` (`/v1/chat/semantic-router`)
+Compile and deploy directly to Apigee:
+
+```bash
+# View side-by-side comparison of your Model Routing config vs. the compiled AFT template
+./apigee-modelrouting diff modelrouting/03-add-anthropic-claude.yaml
+
+# Compile to demo/03-add-anthropic-claude.yaml and import into Apigee via gcloud
+./apigee-modelrouting import modelrouting/03-add-anthropic-claude.yaml --organization=$APIGEE_ORG
+```
 
 ---
 
-## 🔄 Resetting Before a Live Demo (`./demo-cleanup.sh`)
+### 2. Generating a Brand-New Model or Version Feature on the Fly
 
-Run `./demo-cleanup.sh` before starting a live demo (or between practice runs) to undeploy and delete the Act 1 CLI walkthrough proxies (`aft-demo-simple-01` through `aft-demo-simple-04`) and remove any ad-hoc synthesized feature files so that each import command starts cleanly at `revision: '1'`.
-
-> **Note:** `demo-cleanup.sh` **leaves the two pre-deployed live demo proxies** (`aft-demo-simple-05` and `aft-demo-semantic-router`) and the companion backend (`mock-llm-backends`) deployed and untouched, and verifies both endpoints return `HTTP 200 READY`.
+When a new model or provider launches, you don't need to wait for a pre-built template. Simply add it to `model_list` (as shown in [`modelrouting/04-expand-model-catalog.yaml`](modelrouting/04-expand-model-catalog.yaml) with `deepseek/deepseek-reasoner`) or run `./apigee-modelrouting add-model`:
 
 ```bash
-./demo-cleanup.sh
+# Onboard Vertex AI Gemini 3.5 Flash on the fly -> auto-generates demo/target-vertex-ai-gemini-3.5-flash.yaml
+# (automatically includes GoogleAccessToken Service Account IAM auth!)
+./apigee-modelrouting add-model modelrouting/04-expand-model-catalog.yaml \
+  --name gemini-3.5-flash \
+  --model vertex_ai/gemini-3.5-flash \
+  --rpm 1500 --tpm 3000000 \
+  --out /tmp/04-with-gemini-3.5-flash.yaml
+
+# Or onboard xAI Grok-3 -> auto-generates demo/target-xai-grok-3-beta.yaml
+./apigee-modelrouting add-model modelrouting/04-expand-model-catalog.yaml \
+  --name grok-3 \
+  --model xai/grok-3-beta \
+  --api-base https://api.x.ai/v1/chat/completions \
+  --rpm 300 --tpm 600000 \
+  --out /tmp/04-with-grok3.yaml
+```
+
+Because `demo/target-vertex-ai-gemini-3.5-flash.yaml` does not exist yet, `apigee-modelrouting` synthesizes a complete, self-contained AFT feature (`type: feature`) with `<RouteRule>`, `<TargetEndpoint>`, `<Authentication><GoogleAccessToken>`, and model version normalization pinned to `gemini-3.5-flash`.
+
+---
+
+### 3. Enabling Model Armor & Semantic Cache (`gateway_settings`)
+
+Add `model_armor` and `semantic_cache` under `gateway_settings` (see [`modelrouting/05-failover-gateway.yaml`](modelrouting/05-failover-gateway.yaml)):
+
+```yaml
+gateway_settings:
+  drop_params: true
+  semantic_cache:
+    enabled: true
+    embedding_model: vertex_ai/text-embedding-005
+    similarity_threshold: 0.90
+    ttl_seconds: 3600
+  model_armor:
+    enabled: true
+    template_id: projects/my-gcp-project/locations/us-central1/templates/enterprise-ai-safety
+    sanitize_prompt: true
+    sanitize_response: true
+```
+
+When compiled:
+- **`gateway_settings.model_armor`** attaches [`demo/llm-model-armor.yaml`](demo/llm-model-armor.yaml) (`MA-SanitizeUserPrompt` on `PreFlow.Request` + `MA-SanitizeModelResponse` on `PostFlow.Response`) and binds the `MA_TEMPLATE_PATH` parameter to your Model Armor template.
+- **`gateway_settings.semantic_cache`** attaches [`demo/llm-semantic-cache.yaml`](demo/llm-semantic-cache.yaml) (`SCLLookup` querying Vertex AI Vector Search on `PreFlow.Request` + `SCPPopulate` on `PostFlow.Response`) and wires `THRESHOLD` (`0.90`) and `TTL_SECONDS` (`3600`).
+
+---
+
+### 4. Retries, Load Balancing & Ordered Multi-Hop Fallback Chains (`router_settings`)
+
+Configure resiliency and fallback priority order under `router_settings`:
+
+```yaml
+router_settings:
+  routing_strategy: latency-based-routing
+  num_retries: 2
+  retry_after: 1
+  timeout: 30
+  cooldown_time: 60
+  # Ordered Fallback Priority Chain (Priority 1 -> Priority 2 -> Priority 3)
+  fallbacks:
+    - gpt-4o:
+        - claude-3-5-sonnet
+        - gemini-2.5-flash
+        - llama-3.3-70b
+  # Context-Window Overflow Fallback (>128k tokens routes to Gemini 1M context window)
+  context_window_fallbacks:
+    - gpt-4o: ["gemini-2.5-flash"]
+  # Content-Policy / Guardrail Fallback
+  content_policy_fallbacks:
+    - gpt-4o: ["claude-3-5-sonnet"]
+```
+
+When compiled:
+- Attaches [`demo/llm-retry-and-loadbalance.yaml`](demo/llm-retry-and-loadbalance.yaml) (`JS-EvaluateRouterSettings`) to enforce context-window overflow rerouting, retry/cooldown metadata, and routing strategy selection.
+- Attaches [`demo/llm-failover.yaml`](demo/llm-failover.yaml) (`DefaultFaultRule`) to catch `HTTP 429` / `5xx` errors, dynamically transcode the OpenAI payload to the fallback provider's wire format (e.g., Anthropic Messages), and return `HTTP 200 OK`.
+
+---
+
+### 5. Enterprise Authentication Controls (`gateway_settings.auth` & `sync-kvm`)
+
+In production Apigee deployments, authentication is handled across three layers:
+
+1. **Southbound to Vertex AI (`vertex_auth: google_service_account`)**:
+   - No API keys are needed for `vertex_ai/*` models. [`target-vertex-ai-gemini-2.5-flash.yaml`](demo/target-vertex-ai-gemini-2.5-flash.yaml) (and any auto-synthesized `vertex_ai/*` feature) configures native `<Authentication><GoogleAccessToken>` on the `<HTTPTargetConnection>` with scope `https://www.googleapis.com/auth/cloud-platform`.
+   - When deployed with `gcloud beta apigee apis deploy --service-account=YOUR_SA@PROJECT.iam.gserviceaccount.com`, Apigee automatically mints and rotates short-lived OAuth 2.0 tokens using that Service Account.
+2. **Southbound to 3P Providers via Encrypted Apigee KVM (`provider_keys: kvm`)**:
+   - Keep familiar `api_key: os.environ/OPENAI_API_KEY` or `api_key: os.environ/ANTHROPIC_API_KEY` references in `model_list`, and enable `provider_keys: kvm` under `gateway_settings.auth`:
+     ```yaml
+     gateway_settings:
+       auth:
+         vertex_auth: google_service_account
+         provider_keys: kvm
+         kvm_name: llm-provider-credentials
+         client_auth: api_key   # optional northbound VerifyAPIKey
+     ```
+   - This compiles [`demo/llm-auth-kvm.yaml`](demo/llm-auth-kvm.yaml), which uses Apigee's `KeyValueMapOperations` policy (`KVM-GetProviderCredentials`) to retrieve encrypted keys into masked `private.*` flow variables at runtime, injects the provider-specific auth header (`Authorization: Bearer ...` or `x-api-key: ...`), and strips any inbound consumer key so it never leaks southbound.
+   - Run **`sync-kvm`** to generate the Apigee Management API commands that provision the encrypted KVM from your environment variables:
+     ```bash
+     ./apigee-modelrouting sync-kvm modelrouting/05-failover-gateway.yaml --organization=$APIGEE_ORG --environment=$APIGEE_ENV
+     ```
+3. **Northbound Consumer Authentication (`client_auth: api_key`)**:
+   - Compiles [`demo/llm-client-auth.yaml`](demo/llm-client-auth.yaml) (`VA-VerifyConsumerApiKey` + `AM-StripConsumerApiKey`) to validate caller API keys against Apigee API Products before processing the prompt.
+
+---
+
+### 6. Automatic `DataCapture` Token Breakdown for Analytics Dashboards (`cached` vs. `reasoning` vs. `prompt`)
+
+Modern frontier and reasoning models return distinct token categories that carry very different cost profiles (e.g., cached context tokens at 75–90% discount vs. chain-of-thought reasoning tokens billed as output tokens).
+
+Enable `token_analytics` under `gateway_settings`:
+
+```yaml
+gateway_settings:
+  token_analytics:
+    enabled: true
+    collect_token_types:
+      - prompt_tokens
+      - completion_tokens
+      - cached_tokens
+      - reasoning_tokens
+      - total_tokens
+```
+
+This compiles [`demo/llm-token-analytics.yaml`](demo/llm-token-analytics.yaml), which runs:
+1. **`JS-ExtractTokenBreakdown`**: Normalizes usage payloads across OpenAI, Vertex AI Gemini, Anthropic Claude, AWS Bedrock, Cohere, and DeepSeek R1:
+   - **`prompt_tokens`**: `usage.prompt_tokens` / `usage.input_tokens` / `usageMetadata.promptTokenCount`
+   - **`completion_tokens`**: `usage.completion_tokens` / `usage.output_tokens` / `usageMetadata.candidatesTokenCount`
+   - **`cached_tokens`**: OpenAI `prompt_tokens_details.cached_tokens`, Anthropic `cache_read_input_tokens`, Gemini `cachedContentTokenCount`, DeepSeek `prompt_cache_hit_tokens`, plus full-response hits from Apigee's `SCLLookup` Semantic Cache (`HIT_APIGEE_SEMANTIC_CACHE`)
+   - **`reasoning_tokens`**: OpenAI o1/o3 `completion_tokens_details.reasoning_tokens`, Gemini 2.5 Thinking `thoughtsTokenCount`, DeepSeek R1 `reasoning_tokens`, Anthropic `thinking_tokens`
+   - **`total_tokens`**: Total token consumption across all categories
+2. **`DC-CollectLLMTokenAnalytics` (`DataCapture` policy)**: Captures 9 structured dimensions and metrics into Apigee Analytics DataCollectors (`dc_llm_model`, `dc_llm_provider`, `dc_llm_prompt_tokens`, `dc_llm_completion_tokens`, `dc_llm_cached_tokens`, `dc_llm_reasoning_tokens`, `dc_llm_total_tokens`, `dc_llm_cache_status`, `dc_llm_routing_tier`) and exposes real-time `x-apigee-tokens-*` response headers.
+
+Register all 9 `DataCollector` resources in your Apigee organization with one CLI command:
+
+```bash
+./apigee-modelrouting sync-datacollectors --organization=$APIGEE_ORG
 ```
 
 ---
@@ -94,29 +233,31 @@ Run `./demo-cleanup.sh` before starting a live demo (or between practice runs) t
 
 ```
 apigee-modelrouting/
-├── README.md                          ← Architecture guide & step-by-step presenter playbook
+├── README.md                          ← Practitioner guide, heuristics, guardrails, auth & token analytics
+├── EXAMPLE_DEMO.md                    ← Step-by-step 6-stage live demo playbook & presenter script
 ├── LICENSE                            ← Apache 2.0 License
-├── apigee-modelrouting                ← Model Routing YAML -> AFT compiler, synthesizer & importer
-├── demo-cleanup.sh                    ← Resets Stages 1–4 while keeping Stages 5 & 6 deployed
+├── apigee-modelrouting                ← CLI compiler (translate, diff, import, add-model, sync-kvm, sync-datacollectors)
 ├── build-and-deploy.sh                ← Imports & deploys all 6 stages via gcloud
-├── run-demo.sh                        ← CLI runner for Demo A (Stage 5 Quota Failover)
-├── run-semantic-demo.sh               ← CLI runner for Demo B (Stage 6 Semantic Routing)
+├── demo-cleanup.sh                    ← Resets Stages 1–4 while keeping Stages 5 & 6 deployed
+├── run-demo.sh                        ← CLI runner for Stage 5 Quota Failover demo
+├── run-semantic-demo.sh               ← CLI runner for Stage 6 Semantic Routing demo
 ├── server.py                          ← Local HTTP server for the interactive web dashboard
 ├── index.html                         ← 2-Tab Interactive Web Dashboard (Failover + Semantic)
 │
 ├── modelrouting/                      ← Declarative Model Routing Configs (What You Write)
 │   ├── 01-single-model.yaml           ← Stage 1: openai/gpt-4o (with rpm & tpm quotas)
-│   ├── 02-add-vertex-gemini.yaml      ← Stage 2: + vertex_ai/gemini-2.5-flash
-│   ├── 03-add-anthropic-claude.yaml   ← Stage 3: + anthropic/claude-3-5-sonnet-20241022
-│   ├── 04-expand-model-catalog.yaml   ← Stage 4: + bedrock, cohere, mistral + deepseek-reasoner
-│   ├── 05-failover-gateway.yaml       ← Stage 5: + Semantic Cache, Model Armor, Retries & Fallbacks
+│   ├── 02-add-vertex-gemini.yaml      ← Stage 2: + vertex_ai/gemini-2.5-flash (Service Account IAM)
+│   ├── 03-add-anthropic-claude.yaml   ← Stage 3: + anthropic/claude-3-5-sonnet-20241022 (Auto-Transcode)
+│   ├── 04-expand-model-catalog.yaml   ← Stage 4: + bedrock, cohere, mistral + auto-synthesized deepseek-reasoner
+│   ├── 05-failover-gateway.yaml       ← Stage 5: + KVM Auth, Semantic Cache, Model Armor, Fallbacks & Token Analytics
 │   └── 06-semantic-routing.yaml       ← Stage 6: + auto_router/complexity_router (3 tiers)
 │
 ├── demo/                              ← Compiled AFT Templates & Reusable Version-Specific Features
 │   ├── 01-single-model.yaml .. 06-semantic-routing.yaml
 │   ├── llm-base.yaml, llm-cors.yaml, llm-openai-format.yaml
+│   ├── llm-auth-kvm.yaml, llm-client-auth.yaml
 │   ├── llm-model-armor.yaml, llm-semantic-cache.yaml, llm-retry-and-loadbalance.yaml
-│   ├── llm-failover.yaml, llm-semantic-router.yaml
+│   ├── llm-failover.yaml, llm-semantic-router.yaml, llm-token-analytics.yaml
 │   ├── target-openai-gpt-4o.yaml
 │   ├── target-vertex-ai-gemini-2.5-flash.yaml
 │   ├── target-anthropic-claude-3-5-sonnet-20241022.yaml
@@ -128,100 +269,3 @@ apigee-modelrouting/
 └── mock-backend/                      ← Companion mock LLM backend proxy (mock-llm-backends)
     └── apiproxy/                      ← Serves /primary, /anthropic, /gemini, and /classifier
 ```
-
----
-
-## 🎬 Act 1: Live CLI Walkthrough (Stages 1 to 4 + Onboarding a New Model Version)
-
-### Stage 1: Single Model Proxy with `rpm` & `tpm` Quotas (`modelrouting/01-single-model.yaml`)
-Show the declarative `modelrouting/01-single-model.yaml` file with `openai/gpt-4o` (`rpm: 2`, `tpm: 40000`), which maps deterministically to `demo/target-openai-gpt-4o.yaml`:
-```bash
-cat modelrouting/01-single-model.yaml
-
-# Optional: view Model Routing config vs. compiled AFT template side-by-side
-./apigee-modelrouting diff modelrouting/01-single-model.yaml
-
-# Translate modelrouting/01-single-model.yaml -> demo/01-single-model.yaml AND import to Apigee
-./apigee-modelrouting import modelrouting/01-single-model.yaml
-```
-
-### Stage 2: Add Google Vertex AI Gemini 2.5 Flash (`modelrouting/02-add-vertex-gemini.yaml`)
-Add `vertex_ai/gemini-2.5-flash` (`rpm: 1000`, `tpm: 2000000`) to `model_list`. `./apigee-modelrouting` deterministically resolves `vertex_ai/gemini-2.5-flash` $\rightarrow$ `demo/target-vertex-ai-gemini-2.5-flash.yaml`:
-```bash
-cat modelrouting/02-add-vertex-gemini.yaml
-
-./apigee-modelrouting import modelrouting/02-add-vertex-gemini.yaml
-```
-
-### Stage 3: Add Anthropic Claude 3.5 Sonnet with Automatic Payload Transcoding (`modelrouting/03-add-anthropic-claude.yaml`)
-Add `anthropic/claude-3-5-sonnet-20241022` (`rpm: 50`, `tpm: 200000`) to `model_list`. `./apigee-modelrouting` resolves `anthropic/claude-3-5-sonnet-20241022` $\rightarrow$ `demo/target-anthropic-claude-3-5-sonnet-20241022.yaml` — which bundles the TargetEndpoint, route rule, AND bidirectional payload transcoding pinned to `claude-3-5-sonnet-20241022`:
-```bash
-cat modelrouting/03-add-anthropic-claude.yaml
-
-./apigee-modelrouting import modelrouting/03-add-anthropic-claude.yaml
-```
-
-### Stage 4: Multi-Cloud Catalog + Auto-Synthesized Model Feature (`modelrouting/04-expand-model-catalog.yaml`)
-Add **AWS Bedrock Llama 3.3 70B Instruct** (`bedrock/llama-3.3-70b-instruct` $\rightarrow$ `target-bedrock-llama-3.3-70b-instruct.yaml`), **Cohere Command R+ 08-2024** (`cohere/command-r-plus-08-2024` $\rightarrow$ `target-cohere-command-r-plus-08-2024.yaml`), **Mistral Large 2411** (`mistral/mistral-large-2411` $\rightarrow$ `target-mistral-large-2411.yaml`), AND **DeepSeek-R1** (`deepseek/deepseek-reasoner` $\rightarrow$ `target-deepseek-reasoner.yaml`):
-```bash
-cat modelrouting/04-expand-model-catalog.yaml
-
-./apigee-modelrouting import modelrouting/04-expand-model-catalog.yaml
-
-# Inspect the auto-synthesized AFT feature for DeepSeek-R1:
-cat demo/target-deepseek-reasoner.yaml
-```
-
-#### Bonus: Onboard a New Model Version Live (`add-model`)
-Show how adding a new model version (e.g. `vertex_ai/gemini-3.5-flash` or `xai/grok-3-beta`) automatically synthesizes its version-pinned AFT feature (`demo/target-vertex-ai-gemini-3.5-flash.yaml` or `demo/target-xai-grok-3-beta.yaml`):
-```bash
-./apigee-modelrouting add-model modelrouting/04-expand-model-catalog.yaml \
-  --name gemini-3.5-flash \
-  --model vertex_ai/gemini-3.5-flash \
-  --rpm 1500 --tpm 3000000 \
-  --out /tmp/04-with-gemini-3.5-flash.yaml
-```
-
----
-
-## 🎬 Act 2: Pre-Deployed Demo A — Semantic Cache, Model Armor, Retries & Ordered Failover (`modelrouting/05-failover-gateway.yaml`)
-
-Show the Stage 5 Model Routing config and how `router_settings` (latency-based routing, `num_retries: 2`, `cooldown_time: 60`, ordered 3-tier `fallbacks` priority chain `claude-3-5-sonnet -> gemini-2.5-flash -> llama-3.3-70b`, and `context_window_fallbacks`) plus `gateway_settings` (**`semantic_cache`** and **`model_armor`**) compile side-by-side into AFT features:
-```bash
-cat modelrouting/05-failover-gateway.yaml
-
-./apigee-modelrouting diff modelrouting/05-failover-gateway.yaml
-./apigee-modelrouting translate modelrouting/05-failover-gateway.yaml
-```
-
-### How to Present Live Demo A:
-1. Open **Apigee Trace / Debug** on proxy **`aft-demo-simple-05`** in environment **`dev-prog-proxy`**.
-2. Open the **Web Dashboard** (`http://localhost:8080/index.html`) on the **"Live Demo A • Stage 5: Automated HTTP 429 Failover & Transcoding"** tab (or run `./run-demo.sh` in your terminal).
-3. Click **Send Request** three times:
-   - **Call 1/3**: Routed to `primary-target` (`gpt-4o`), returns `HTTP 200 OK` (`1` req remaining in quota).
-   - **Call 2/3**: Routed to `primary-target` (`gpt-4o`), returns `HTTP 200 OK` (`0` reqs remaining in quota).
-   - **Call 3/3**: Trips the 2 req/min quota! `primary-target` returns `HTTP 429`. Apigee's `DefaultFaultRule` (`FallbackToAnthropic`) catches the 429 in real time, selects Priority-1 fallback **`claude-3-5-sonnet-20241022`**, transcodes the OpenAI payload to Anthropic Messages format, calls Claude 3.5 Sonnet, transcodes the response back to OpenAI format, and returns **`HTTP 200 OK`**.
-
----
-
-## 🎬 Act 3: Pre-Deployed Demo B — Semantic Model Routing (`modelrouting/06-semantic-routing.yaml`)
-
-Show the Stage 6 Model Routing config combining `auto_router/complexity_router` (`llm-semantic-router.yaml`) with Semantic Cache, Model Armor, and ordered Fallbacks:
-```bash
-./apigee-modelrouting diff modelrouting/06-semantic-routing.yaml
-```
-
-### How `auto_router/complexity_router` $\rightarrow$ `llm-semantic-router.yaml` Works:
-- The client sends a standard OpenAI Chat Completions request with `"model": "auto"`.
-- In `PreFlow.Request`, `SC-ClassifyPromptIntent` calls a lightweight, inexpensive classifier model (`gemini-2.5-flash-lite`) to classify the prompt's complexity and domain into one of three tiers:
-  1. **`SIMPLE_QA`** $\rightarrow$ Rewrites `llm.model = "gemini-2.5-flash"` $\rightarrow$ Routes to **`gemini-target`** (`target-vertex-ai-gemini-2.5-flash.yaml`, Tier-1 Economy).
-  2. **`CODING`** $\rightarrow$ Rewrites `llm.model = "claude-3-5-sonnet-20241022"` $\rightarrow$ Routes to **`anthropic-target`** (`target-anthropic-claude-3-5-sonnet-20241022.yaml`, Tier-2 Coding Specialist, automatically transcoding OpenAI $\leftrightarrow$ Anthropic Messages format!).
-  3. **`COMPLEX_REASONING`** $\rightarrow$ Rewrites `llm.model = "gpt-4o"` $\rightarrow$ Routes to **`primary-target`** (`target-openai-gpt-4o.yaml`, Tier-3 Frontier Reasoning).
-
-### How to Present Live Demo B:
-1. Open **Apigee Trace / Debug** on proxy **`aft-demo-semantic-router`** in environment **`dev-prog-proxy`**.
-2. In the **Web Dashboard** (`http://localhost:8080/index.html`), click the second tab: **"Live Demo B • Stage 6: Semantic Model Routing (Flash-Lite Classifier)"** (or run `./run-semantic-demo.sh` in your terminal).
-3. Step through the 3 prompts:
-   - **Intent 1 (Factual Q&A)**: *"What is the capital of Sweden and what currency does it use?"* $\rightarrow$ Classified as `SIMPLE_QA` $\rightarrow$ Routed to **Gemini 2.5 Flash**.
-   - **Intent 2 (Coding)**: *"Write a Python decorator that implements exponential backoff retry for HTTP requests."* $\rightarrow$ Classified as `CODING` $\rightarrow$ Routed & auto-transcoded to **Anthropic Claude 3.5 Sonnet (`claude-3-5-sonnet-20241022`)**.
-   - **Intent 3 (Complex Reasoning)**: *"Analyze the game-theoretic Nash equilibrium of a multi-region cloud spot-instance pricing auction."* $\rightarrow$ Classified as `COMPLEX_REASONING` $\rightarrow$ Routed to **OpenAI GPT-4o**.

@@ -1,0 +1,195 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-token-analytics
+type: feature
+description: >
+  Multi-Provider Token Telemetry & Apigee DataCapture Feature.
+  Normalizes token counts across OpenAI, Vertex AI Gemini, Anthropic Claude,
+  AWS Bedrock, Cohere, and DeepSeek response payloads—explicitly separating
+  standard `prompt_tokens`, `completion_tokens`, context/semantic `cached_tokens`,
+  and thinking/chain-of-thought `reasoning_tokens`—and records them into Apigee
+  DataCollectors (`dc_llm_*`) via the `DataCapture` policy (`DC-CollectLLMTokenAnalytics`)
+  for custom analytics dashboards.
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PostFlow
+      mode: Response
+      steps:
+        - name: JS-ExtractTokenBreakdown
+          condition: request.verb = "POST"
+        - name: DC-CollectLLMTokenAnalytics
+          condition: request.verb = "POST"
+
+policies:
+  - name: JS-ExtractTokenBreakdown
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-ExtractTokenBreakdown
+          timeLimit: "200"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: JS-ExtractTokenBreakdown
+        ResourceURL:
+          _text: "jsc://extract-token-breakdown.js"
+
+  - name: DC-CollectLLMTokenAnalytics
+    type: DataCapture
+    content:
+      DataCapture:
+        metadata:
+          name: DC-CollectLLMTokenAnalytics
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: DC-CollectLLMTokenAnalytics
+        IgnoreUnresolvedVariables: "true"
+        Capture:
+          - DataCollector:
+              _text: dc_llm_model
+            Collect:
+              metadata:
+                ref: llm.analytics.model
+                default: unknown
+          - DataCollector:
+              _text: dc_llm_provider
+            Collect:
+              metadata:
+                ref: llm.analytics.provider
+                default: openai
+          - DataCollector:
+              _text: dc_llm_prompt_tokens
+            Collect:
+              metadata:
+                ref: llm.analytics.prompt_tokens
+                default: "0"
+          - DataCollector:
+              _text: dc_llm_completion_tokens
+            Collect:
+              metadata:
+                ref: llm.analytics.completion_tokens
+                default: "0"
+          - DataCollector:
+              _text: dc_llm_cached_tokens
+            Collect:
+              metadata:
+                ref: llm.analytics.cached_tokens
+                default: "0"
+          - DataCollector:
+              _text: dc_llm_reasoning_tokens
+            Collect:
+              metadata:
+                ref: llm.analytics.reasoning_tokens
+                default: "0"
+          - DataCollector:
+              _text: dc_llm_total_tokens
+            Collect:
+              metadata:
+                ref: llm.analytics.total_tokens
+                default: "0"
+          - DataCollector:
+              _text: dc_llm_cache_status
+            Collect:
+              metadata:
+                ref: llm.analytics.cache_status
+                default: MISS
+          - DataCollector:
+              _text: dc_llm_routing_tier
+            Collect:
+              metadata:
+                ref: llm.analytics.routing_tier
+                default: DIRECT
+
+resources:
+  - name: extract-token-breakdown.js
+    type: jsc
+    content: |
+      try {
+        var raw = context.getVariable("response.content");
+        var promptTokens = 0;
+        var completionTokens = 0;
+        var cachedTokens = 0;
+        var reasoningTokens = 0;
+        var totalTokens = 0;
+        var modelUsed = context.getVariable("response.header.x-apigee-model") ||
+                        context.getVariable("llm.selected_model") ||
+                        context.getVariable("llm.model") || "unknown";
+        var providerUsed = context.getVariable("response.header.x-apigee-provider") || "openai";
+
+        if (raw) {
+          var body = JSON.parse(raw);
+          if (body.model) { modelUsed = body.model; }
+          var u = body.usage || body.usageMetadata || {};
+
+          // 1. Standard Prompt / Input Tokens
+          promptTokens = u.prompt_tokens || u.input_tokens || u.promptTokenCount || 0;
+
+          // 2. Standard Completion / Output Tokens
+          completionTokens = u.completion_tokens || u.output_tokens || u.candidatesTokenCount || 0;
+
+          // 3. Cached Tokens (OpenAI prompt_tokens_details.cached_tokens, Anthropic cache_read_input_tokens,
+          //    Vertex Gemini cachedContentTokenCount, DeepSeek prompt_cache_hit_tokens)
+          if (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) {
+            cachedTokens = u.prompt_tokens_details.cached_tokens;
+          } else if (u.cache_read_input_tokens) {
+            cachedTokens = u.cache_read_input_tokens;
+          } else if (u.cachedContentTokenCount) {
+            cachedTokens = u.cachedContentTokenCount;
+          } else if (u.prompt_cache_hit_tokens) {
+            cachedTokens = u.prompt_cache_hit_tokens;
+          } else if (u.cached_tokens) {
+            cachedTokens = u.cached_tokens;
+          }
+
+          // 4. Reasoning / Thinking Tokens (OpenAI o1/o3 completion_tokens_details.reasoning_tokens,
+          //    Vertex Gemini 2.5 thoughtsTokenCount, DeepSeek R1 reasoning_tokens, Anthropic thinking_tokens)
+          if (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) {
+            reasoningTokens = u.completion_tokens_details.reasoning_tokens;
+          } else if (u.thoughtsTokenCount) {
+            reasoningTokens = u.thoughtsTokenCount;
+          } else if (u.reasoning_tokens) {
+            reasoningTokens = u.reasoning_tokens;
+          } else if (u.thinking_tokens) {
+            reasoningTokens = u.thinking_tokens;
+          }
+
+          // 5. Total Tokens
+          totalTokens = u.total_tokens || u.totalTokenCount || (promptTokens + completionTokens + reasoningTokens);
+        }
+
+        // Check if Apigee Semantic Cache served this response directly
+        var semCacheHit = context.getVariable("semanticcache.SCLLookup.cache_hit");
+        var cacheStatus = "MISS";
+        if (semCacheHit === "true" || semCacheHit === true) {
+          cacheStatus = "HIT_APIGEE_SEMANTIC_CACHE";
+          cachedTokens = totalTokens > 0 ? totalTokens : promptTokens;
+        } else if (cachedTokens > 0) {
+          cacheStatus = "HIT_PROVIDER_CONTEXT_CACHE";
+        }
+
+        var routingTier = context.getVariable("llm.semantic_intent") ||
+                          (context.getVariable("response.header.x-apigee-fallback") === "true" ? "FAILOVER_RECOVERY" : "DIRECT");
+
+        // Set integer/string flow variables consumed by DC-CollectLLMTokenAnalytics (DataCapture -> DataCollectors)
+        context.setVariable("llm.analytics.model", String(modelUsed));
+        context.setVariable("llm.analytics.provider", String(providerUsed));
+        context.setVariable("llm.analytics.prompt_tokens", parseInt(promptTokens, 10) || 0);
+        context.setVariable("llm.analytics.completion_tokens", parseInt(completionTokens, 10) || 0);
+        context.setVariable("llm.analytics.cached_tokens", parseInt(cachedTokens, 10) || 0);
+        context.setVariable("llm.analytics.reasoning_tokens", parseInt(reasoningTokens, 10) || 0);
+        context.setVariable("llm.analytics.total_tokens", parseInt(totalTokens, 10) || 0);
+        context.setVariable("llm.analytics.cache_status", String(cacheStatus));
+        context.setVariable("llm.analytics.routing_tier", String(routingTier));
+
+        // Surface telemetry headers for real-time inspection in curl & Apigee Trace
+        context.setVariable("response.header.x-apigee-tokens-prompt", String(promptTokens));
+        context.setVariable("response.header.x-apigee-tokens-completion", String(completionTokens));
+        context.setVariable("response.header.x-apigee-tokens-cached", String(cachedTokens));
+        context.setVariable("response.header.x-apigee-tokens-reasoning", String(reasoningTokens));
+        context.setVariable("response.header.x-apigee-tokens-total", String(totalTokens));
+        context.setVariable("response.header.x-apigee-cache-status", String(cacheStatus));
+      } catch (e) {
+        print("Error extracting token breakdown for DataCapture: " + e);
+      }

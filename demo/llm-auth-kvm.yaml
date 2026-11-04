@@ -1,0 +1,132 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-auth-kvm
+type: feature
+description: >
+  Southbound LLM Provider Credential Vault (Encrypted Apigee KVM).
+  Translates `api_key: os.environ/<PROVIDER>_API_KEY` or `gateway_settings.auth.provider_keys: kvm`
+  into an encrypted Apigee KeyValueMapOperations lookup (`KVM-GetProviderCredentials`)
+  that loads provider secrets into masked `private.*` variables at runtime and
+  dynamically attaches the appropriate provider authentication header
+  (`Authorization: Bearer ...` or `x-api-key: ...`) while stripping any
+  inbound consumer credentials so they never leak to third-party LLM providers.
+
+parameters:
+  - name: KVM_MAP_NAME
+    displayName: Encrypted Apigee KVM Name for LLM Provider Keys
+    default: llm-provider-credentials
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: KVM-GetProviderCredentials
+          condition: request.verb = "POST"
+        - name: JS-PrepareProviderAuth
+          condition: request.verb = "POST"
+
+policies:
+  - name: KVM-GetProviderCredentials
+    type: KeyValueMapOperations
+    content:
+      KeyValueMapOperations:
+        metadata:
+          name: KVM-GetProviderCredentials
+          continueOnError: "true"
+          enabled: "true"
+          mapIdentifier: "{KVM_MAP_NAME}"
+        DisplayName: KVM-GetProviderCredentials
+        ExpiryTimeInSecs: "300"
+        Scope: environment
+        Get:
+          - metadata:
+              assignTo: private.openai_api_key
+            Key:
+              Parameter:
+                _text: OPENAI_API_KEY
+          - metadata:
+              assignTo: private.anthropic_api_key
+            Key:
+              Parameter:
+                _text: ANTHROPIC_API_KEY
+          - metadata:
+              assignTo: private.cohere_api_key
+            Key:
+              Parameter:
+                _text: COHERE_API_KEY
+          - metadata:
+              assignTo: private.mistral_api_key
+            Key:
+              Parameter:
+                _text: MISTRAL_API_KEY
+          - metadata:
+              assignTo: private.deepseek_api_key
+            Key:
+              Parameter:
+                _text: DEEPSEEK_API_KEY
+
+  - name: JS-PrepareProviderAuth
+    type: Javascript
+    content:
+      Javascript:
+        metadata:
+          name: JS-PrepareProviderAuth
+          timeLimit: "200"
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: JS-PrepareProviderAuth
+        ResourceURL:
+          _text: "jsc://prepare-provider-auth.js"
+
+resources:
+  - name: prepare-provider-auth.js
+    type: jsc
+    content: |
+      try {
+        // Strip any northbound consumer API keys so they never leak southbound to 3P LLM providers
+        context.removeVariable("request.header.x-api-key");
+
+        var model = (context.getVariable("llm.model") || "gpt-4o").toLowerCase();
+        var authMode = "gcp-service-account-iam";
+
+        if (model.indexOf("claude") !== -1 || model.indexOf("anthropic") !== -1) {
+          var anthropicKey = context.getVariable("private.anthropic_api_key");
+          if (anthropicKey) {
+            context.setVariable("request.header.x-api-key", anthropicKey);
+          }
+          authMode = "kvm:llm-provider-credentials/ANTHROPIC_API_KEY";
+        } else if (model.indexOf("command") !== -1 || model.indexOf("cohere") !== -1) {
+          var cohereKey = context.getVariable("private.cohere_api_key");
+          if (cohereKey) {
+            context.setVariable("request.header.Authorization", "Bearer " + cohereKey);
+          }
+          authMode = "kvm:llm-provider-credentials/COHERE_API_KEY";
+        } else if (model.indexOf("mistral") !== -1) {
+          var mistralKey = context.getVariable("private.mistral_api_key");
+          if (mistralKey) {
+            context.setVariable("request.header.Authorization", "Bearer " + mistralKey);
+          }
+          authMode = "kvm:llm-provider-credentials/MISTRAL_API_KEY";
+        } else if (model.indexOf("deepseek") !== -1) {
+          var deepseekKey = context.getVariable("private.deepseek_api_key");
+          if (deepseekKey) {
+            context.setVariable("request.header.Authorization", "Bearer " + deepseekKey);
+          }
+          authMode = "kvm:llm-provider-credentials/DEEPSEEK_API_KEY";
+        } else if (model.indexOf("gemini") !== -1 || model.indexOf("vertex") !== -1) {
+          // Vertex AI uses native <GoogleAccessToken> minted by the proxy's attached GCP Service Account
+          authMode = "gcp-iam:GoogleAccessToken (Service Account)";
+        } else {
+          var openaiKey = context.getVariable("private.openai_api_key");
+          if (openaiKey) {
+            context.setVariable("request.header.Authorization", "Bearer " + openaiKey);
+          }
+          authMode = "kvm:llm-provider-credentials/OPENAI_API_KEY";
+        }
+
+        context.setVariable("llm.auth_mode", authMode);
+      } catch (e) {
+        print("Error preparing provider auth: " + e);
+      }

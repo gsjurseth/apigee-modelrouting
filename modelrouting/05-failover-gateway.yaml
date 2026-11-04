@@ -1,8 +1,11 @@
-# Stage 5: Enterprise Router & Guardrails (Semantic Cache, Model Armor, Retries & Ordered Fallbacks)
+# Stage 5: Enterprise Router & Guardrails (Auth Controls, Semantic Cache, Model Armor, Retries, Fallbacks & Token Analytics)
 # - router_settings: latency-based routing, retries/cooldowns, ordered fallback priority chain,
 #   context-window overflow fallbacks, and content-policy fallbacks
-# - gateway_settings: Vertex Vector Search Semantic Cache (`llm-semantic-cache.yaml`) and
-#   Google Cloud Model Armor prompt/response sanitization (`llm-model-armor.yaml`)
+# - gateway_settings:
+#     * auth: Vertex AI IAM Service Account (`GoogleAccessToken`) + Encrypted Apigee KVM Vault (`llm-auth-kvm.yaml`)
+#     * semantic_cache: Vertex Vector Search Semantic Cache (`llm-semantic-cache.yaml`)
+#     * model_armor: Google Cloud Model Armor prompt/response sanitization (`llm-model-armor.yaml`)
+#     * token_analytics: Apigee DataCollector capturing prompt, completion, cached & reasoning tokens (`llm-token-analytics.yaml`)
 
 model_list:
   - model_name: gpt-4o
@@ -69,6 +72,10 @@ router_settings:
 
 gateway_settings:
   drop_params: true
+  auth:
+    vertex_auth: google_service_account
+    provider_keys: kvm
+    kvm_name: llm-provider-credentials
   semantic_cache:
     enabled: true
     embedding_model: vertex_ai/text-embedding-005
@@ -79,3 +86,11 @@ gateway_settings:
     template_id: projects/apigee-product-demo/locations/us-central1/templates/enterprise-ai-safety
     sanitize_prompt: true
     sanitize_response: true
+  token_analytics:
+    enabled: true
+    collect_token_types:
+      - prompt_tokens
+      - completion_tokens
+      - cached_tokens
+      - reasoning_tokens
+      - total_tokens

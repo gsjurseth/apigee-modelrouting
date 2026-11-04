@@ -1,0 +1,55 @@
+gateway: apigee
+schemaVersion: 1.0.0
+name: llm-client-auth
+type: feature
+description: >
+  Northbound Consumer Authentication (`VerifyAPIKey`).
+  Compiled when `gateway_settings.auth.client_auth: api_key` or `general_settings.master_key`
+  is enabled. Verifies the caller's Apigee Developer App API key (`x-api-key`) against
+  authorized Apigee API Products and strips the consumer key before forwarding southbound.
+
+defaultEndpoint:
+  name: default
+  flows:
+    - name: PreFlow
+      mode: Request
+      steps:
+        - name: VA-VerifyConsumerApiKey
+          condition: request.verb = "POST"
+        - name: AM-StripConsumerApiKey
+          condition: request.verb = "POST"
+
+policies:
+  - name: VA-VerifyConsumerApiKey
+    type: VerifyAPIKey
+    content:
+      VerifyAPIKey:
+        metadata:
+          name: VA-VerifyConsumerApiKey
+          continueOnError: "false"
+          enabled: "true"
+        DisplayName: VA-VerifyConsumerApiKey
+        APIKey:
+          metadata:
+            ref: request.header.x-api-key
+
+  - name: AM-StripConsumerApiKey
+    type: AssignMessage
+    content:
+      AssignMessage:
+        metadata:
+          name: AM-StripConsumerApiKey
+          continueOnError: "true"
+          enabled: "true"
+        DisplayName: AM-StripConsumerApiKey
+        Remove:
+          Headers:
+            Header:
+              - metadata:
+                  name: x-api-key
+        IgnoreUnresolvedVariables: "true"
+        AssignTo:
+          metadata:
+            createNew: "false"
+            transport: http
+            type: request

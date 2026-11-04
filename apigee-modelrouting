@@ -9,7 +9,14 @@ Supports:
   - Multi-provider `model_list` (with rpm/tpm quotas & automatic brand-new model/version feature synthesis)
   - `router_settings`: routing_strategy, num_retries, retry_after, timeout, cooldown_time,
     ordered `fallbacks` priority chains, `context_window_fallbacks`, `content_policy_fallbacks`
-  - `gateway_settings`: `semantic_cache` (Vertex Vector Search) & `model_armor` (Prompt/Response Sanitization)
+  - `gateway_settings.semantic_cache`: Vertex Vector Search semantic caching (`llm-semantic-cache.yaml`)
+  - `gateway_settings.model_armor`: Google Cloud Model Armor prompt/response sanitization (`llm-model-armor.yaml`)
+  - `gateway_settings.auth`:
+      * `vertex_auth: google_service_account` -> native `<GoogleAccessToken>` on Vertex AI targets
+      * `provider_keys: kvm` -> encrypted Apigee KVM vault lookup (`llm-auth-kvm.yaml`)
+      * `client_auth: api_key` -> northbound consumer API key verification (`llm-client-auth.yaml`)
+  - `gateway_settings.token_analytics`: Multi-provider token breakdown (prompt, completion, cached,
+    reasoning, total) recorded via Apigee `DataCollector` (`llm-token-analytics.yaml`)
   - `auto_router/complexity_router`: Semantic intent classification via Flash-Lite (`llm-semantic-router.yaml`)
 """
 
@@ -33,9 +40,9 @@ RESET = "\033[0m"
 # Provider wire-protocol metadata used for display and version-specific feature synthesis
 PROVIDER_PROTOCOL_INFO = {
     "openai": "Native OpenAI Chat Completions wire format",
-    "vertex_ai": "Vertex AI Gemini endpoint + GoogleAccessToken IAM auth",
-    "gemini": "Vertex AI Gemini endpoint + GoogleAccessToken IAM auth",
-    "google": "Vertex AI Gemini endpoint + GoogleAccessToken IAM auth",
+    "vertex_ai": "Vertex AI Gemini endpoint + GoogleAccessToken IAM Service Account auth",
+    "gemini": "Vertex AI Gemini endpoint + GoogleAccessToken IAM Service Account auth",
+    "google": "Vertex AI Gemini endpoint + GoogleAccessToken IAM Service Account auth",
     "anthropic": "Auto-Transcoded: OpenAI <-> Anthropic Messages v1 API",
     "bedrock": "Auto-Transcoded: OpenAI <-> AWS Bedrock Converse API",
     "cohere": "Auto-Transcoded: OpenAI <-> Cohere Chat v1 API",
@@ -59,7 +66,7 @@ STAGE_DEFAULTS = {
         "include_cors": False,
         "description": (
             "Stage 2 -- Onboard Google Vertex AI Gemini 2.5 Flash (compiled from Model Routing config). "
-            "Adds target-vertex-ai-gemini-2.5-flash.yaml via deterministic 1:1 model heuristic."
+            "Adds target-vertex-ai-gemini-2.5-flash.yaml with GoogleAccessToken Service Account auth."
         ),
     },
     "03-add-anthropic-claude.yaml": {
@@ -87,8 +94,8 @@ STAGE_DEFAULTS = {
         "base_path": "/v1/chat/simple-stage5",
         "include_cors": True,
         "description": (
-            "Stage 5 -- Resilient Enterprise AI Gateway with Semantic Cache, Model Armor, Retries, "
-            "and Ordered Multi-Hop Failover (compiled from Model Routing config)."
+            "Stage 5 -- Resilient Enterprise AI Gateway with Encrypted KVM Auth, Semantic Cache, "
+            "Model Armor, Retries, Ordered Multi-Hop Failover, and DataCollector Token Analytics."
         ),
     },
     "06-semantic-routing.yaml": {
@@ -96,8 +103,9 @@ STAGE_DEFAULTS = {
         "base_path": "/v1/chat/semantic-router",
         "include_cors": True,
         "description": (
-            "Stage 6 -- Semantic Model Routing Gateway + Enterprise Guardrails (compiled from Model Routing config). "
-            "Maps auto_router/complexity_router to llm-semantic-router.yaml alongside Semantic Cache and Model Armor."
+            "Stage 6 -- Semantic Model Routing Gateway + Enterprise Guardrails & Token Analytics "
+            "(compiled from Model Routing config). Maps auto_router/complexity_router to "
+            "llm-semantic-router.yaml alongside KVM Auth, Semantic Cache, Model Armor, and DataCollector."
         ),
     },
 }
@@ -149,7 +157,8 @@ def synthesize_model_target_feature(
     feature_path = demo_dir / feature_filename
     target_name = f"{slug}-target"
 
-    if provider in ("vertex_ai", "gemini", "google"):
+    is_vertex = provider in ("vertex_ai", "gemini", "google")
+    if is_vertex:
         project = params.get("vertex_project") or os.environ.get("APIGEE_ORG", "apigee-product-demo")
         location = params.get("vertex_location") or "us-central1"
         default_url = (
@@ -170,6 +179,28 @@ def synthesize_model_target_feature(
     js_policy_name = f"JS-Normalize{pascal}Request"
     am_policy_name = f"AM-Set{pascal}Headers"
     js_resource_name = f"normalize-{slug}-request.js"
+
+    target_entry = {
+        "name": target_name,
+        "url": api_base,
+    }
+    if is_vertex:
+        # Automatically configure GoogleAccessToken Service Account authentication for Vertex AI targets
+        target_entry["auth"] = "GoogleAccessToken"
+        target_entry["scopes"] = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    target_entry["flows"] = [
+        {
+            "name": "PreFlow",
+            "mode": "Request",
+            "steps": [{"name": js_policy_name}],
+        },
+        {
+            "name": "PostFlow",
+            "mode": "Response",
+            "steps": [{"name": am_policy_name}],
+        },
+    ]
 
     feature_doc = {
         "gateway": "apigee",
@@ -196,24 +227,7 @@ def synthesize_model_target_feature(
                 }
             ],
         },
-        "targets": [
-            {
-                "name": target_name,
-                "url": api_base,
-                "flows": [
-                    {
-                        "name": "PreFlow",
-                        "mode": "Request",
-                        "steps": [{"name": js_policy_name}],
-                    },
-                    {
-                        "name": "PostFlow",
-                        "mode": "Response",
-                        "steps": [{"name": am_policy_name}],
-                    },
-                ],
-            }
-        ],
+        "targets": [target_entry],
         "policies": [
             {
                 "name": js_policy_name,
@@ -340,6 +354,7 @@ def compile_modelrouting_to_aft(
     model_list = cfg.get("model_list") or []
     mapped_models = []
     auto_router_cfg = None
+    referenced_env_keys = []
 
     for entry in model_list:
         m_name = entry.get("model_name", "default")
@@ -364,6 +379,16 @@ def compile_modelrouting_to_aft(
                 },
             }
             continue
+
+        api_key_ref = str(params.get("api_key") or "")
+        if api_key_ref.startswith("os.environ/"):
+            k_name = api_key_ref.split("/", 1)[1]
+            if k_name not in referenced_env_keys:
+                referenced_env_keys.append(k_name)
+        elif api_key_ref.startswith("kvm/"):
+            k_name = api_key_ref.split("/")[-1]
+            if k_name not in referenced_env_keys:
+                referenced_env_keys.append(k_name)
 
         # Deterministic 1:1 Heuristic: `<provider>/<model-version>` -> `target-<provider>-<model-version>.yaml`
         feat_file = model_string_to_feature_filename(full_model)
@@ -394,6 +419,7 @@ def compile_modelrouting_to_aft(
             "transcoding": transcoding,
             "rpm": rpm,
             "tpm": tpm,
+            "api_key_ref": api_key_ref,
             "is_synthesized": is_synthesized,
         })
 
@@ -434,14 +460,48 @@ def compile_modelrouting_to_aft(
         or (isinstance(model_armor_cfg, dict) and model_armor_cfg.get("enabled", bool(model_armor_cfg)))
     )
 
-    if fallbacks or has_router_policy or has_semantic_cache or has_model_armor:
+    # Enterprise Auth Settings (`gateway_settings.auth`)
+    auth_cfg = gateway_settings.get("auth") or {}
+    has_kvm_auth = bool(
+        isinstance(auth_cfg, dict)
+        and (
+            auth_cfg.get("provider_keys") == "kvm"
+            or auth_cfg.get("kvm_enabled") is True
+            or auth_cfg.get("kvm_name")
+        )
+    )
+    has_client_auth = bool(
+        general.get("master_key")
+        or (isinstance(auth_cfg, dict) and auth_cfg.get("client_auth") in ("api_key", "verify_api_key", True))
+    )
+
+    # Automatic DataCollector Token Analytics (`gateway_settings.token_analytics`)
+    token_analytics_cfg = gateway_settings.get("token_analytics") or {}
+    has_token_analytics = bool(
+        token_analytics_cfg is True
+        or (isinstance(token_analytics_cfg, dict) and token_analytics_cfg.get("enabled", bool(token_analytics_cfg)))
+    )
+
+    if (
+        fallbacks
+        or has_router_policy
+        or has_semantic_cache
+        or has_model_armor
+        or has_kvm_auth
+        or has_token_analytics
+    ):
         include_cors = True
 
     # Assemble ordered feature list matching our AFT templates
     features = ["llm-base.yaml"]
     if include_cors:
         features.append("llm-cors.yaml")
+    if has_client_auth:
+        features.append("llm-client-auth.yaml")
     features.append("llm-openai-format.yaml")
+
+    if has_kvm_auth:
+        features.append("llm-auth-kvm.yaml")
 
     if has_model_armor:
         features.append("llm-model-armor.yaml")
@@ -462,8 +522,13 @@ def compile_modelrouting_to_aft(
     if fallbacks:
         features.append("llm-failover.yaml")
 
-    # Build parameters list (always BASE_PATH, plus optional overrides from semantic_cache / model_armor)
+    if has_token_analytics:
+        features.append("llm-token-analytics.yaml")
+
+    # Build parameters list
     parameters = [{"name": "BASE_PATH", "default": base_path}]
+    if has_kvm_auth and isinstance(auth_cfg, dict) and auth_cfg.get("kvm_name"):
+        parameters.append({"name": "KVM_MAP_NAME", "default": str(auth_cfg["kvm_name"])})
     if has_model_armor and isinstance(model_armor_cfg, dict) and model_armor_cfg.get("template_id"):
         parameters.append({"name": "MA_TEMPLATE_PATH", "default": str(model_armor_cfg["template_id"])})
     if has_semantic_cache and isinstance(sem_cache_cfg, dict):
@@ -515,6 +580,7 @@ def compile_modelrouting_to_aft(
         "base_path": base_path,
         "include_cors": include_cors,
         "mapped_models": mapped_models,
+        "referenced_env_keys": referenced_env_keys,
         "routing_strategy": routing_strategy,
         "num_retries": num_retries,
         "retry_after": retry_after,
@@ -528,6 +594,11 @@ def compile_modelrouting_to_aft(
         "sem_cache_cfg": sem_cache_cfg if isinstance(sem_cache_cfg, dict) else {},
         "has_model_armor": has_model_armor,
         "model_armor_cfg": model_armor_cfg if isinstance(model_armor_cfg, dict) else {},
+        "has_kvm_auth": has_kvm_auth,
+        "has_client_auth": has_client_auth,
+        "auth_cfg": auth_cfg if isinstance(auth_cfg, dict) else {},
+        "has_token_analytics": has_token_analytics,
+        "token_analytics_cfg": token_analytics_cfg if isinstance(token_analytics_cfg, dict) else {},
         "auto_router": auto_router_cfg,
         "features": features,
     }
@@ -560,6 +631,8 @@ def print_translation_report(report: dict, aft_yaml_str: str):
     print(f"     • {CYAN}llm-base.yaml{RESET}           {DIM}(ProxyEndpoint skeleton){RESET}")
     if report["include_cors"]:
         print(f"     • {CYAN}llm-cors.yaml{RESET}           {DIM}(Browser CORS preflight & response headers){RESET}")
+    if report["has_client_auth"]:
+        print(f"     • {CYAN}llm-client-auth.yaml{RESET}    {DIM}(Northbound VerifyAPIKey + strip consumer key){RESET}")
     print(f"     • {CYAN}llm-openai-format.yaml{RESET}  {DIM}(Extracts $.model -> llm.model & prompt){RESET}")
 
     print(
@@ -586,9 +659,20 @@ def print_translation_report(report: dict, aft_yaml_str: str):
         or report["auto_router"]
         or report["has_semantic_cache"]
         or report["has_model_armor"]
+        or report["has_kvm_auth"]
+        or report["has_token_analytics"]
     )
     if has_sec_3:
         print(f"\n  {BOLD}3. `router_settings` & `gateway_settings` -> Enterprise AFT Policy Features:{RESET}")
+        if report["has_kvm_auth"]:
+            ac = report["auth_cfg"]
+            kvm_name = ac.get("kvm_name", "llm-provider-credentials")
+            keys_str = ", ".join(report["referenced_env_keys"]) or "OPENAI_API_KEY, ANTHROPIC_API_KEY, ..."
+            print(
+                f"     • {MAGENTA}gateway_settings.auth (Southbound KVM + Vertex IAM):{RESET} kvm={kvm_name} ({keys_str})\n"
+                f"       └─► {GREEN}llm-auth-kvm.yaml{RESET}                 "
+                f"{DIM}[KVM-GetProviderCredentials (private.*) + GoogleAccessToken IAM]{RESET}"
+            )
         if report["has_model_armor"]:
             ma = report["model_armor_cfg"]
             tmpl = ma.get("template_id", "default")
@@ -632,6 +716,17 @@ def print_translation_report(report: dict, aft_yaml_str: str):
                 f"     • {MAGENTA}auto_router/complexity_router:{RESET} classifier={clf}, tiers={tiers}\n"
                 f"       └─► {GREEN}llm-semantic-router.yaml{RESET}          "
                 f"{DIM}[SC-ClassifyPromptIntent -> Rewrites llm.model pre-routing]{RESET}"
+            )
+        if report["has_token_analytics"]:
+            ta = report["token_analytics_cfg"]
+            tok_types = ta.get(
+                "collect_token_types",
+                ["prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens"],
+            )
+            print(
+                f"     • {MAGENTA}gateway_settings.token_analytics (DataCollector):{RESET} {tok_types}\n"
+                f"       └─► {GREEN}llm-token-analytics.yaml{RESET}          "
+                f"{DIM}[DC-CollectLLMTokenAnalytics: prompt vs cached vs reasoning tokens]{RESET}"
             )
 
     print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
@@ -712,6 +807,92 @@ def handle_add_model(args, demo_dir: Path):
     print_translation_report(report, aft_yaml_str)
 
 
+def handle_sync_kvm(args):
+    """Inspect all `os.environ/<KEY>` references in a Model Routing config and generate/sync the Apigee Encrypted KVM."""
+    src_path = Path(args.config)
+    if not src_path.exists():
+        sys.exit(f"Error: Model Routing config file not found: {src_path}")
+
+    with open(src_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    gateway_settings = cfg.get("gateway_settings") or {}
+    auth_cfg = gateway_settings.get("auth") or {}
+    kvm_name = args.kvm_name or (auth_cfg.get("kvm_name") if isinstance(auth_cfg, dict) else None) or "llm-provider-credentials"
+
+    keys = []
+    for entry in cfg.get("model_list") or []:
+        params = entry.get("model_params") or {}
+        api_key = str(params.get("api_key") or "")
+        model_str = str(params.get("model") or "")
+        if api_key.startswith("os.environ/"):
+            k = api_key.split("/", 1)[1]
+            keys.append((entry.get("model_name"), model_str, k, "KVM Encrypted Entry"))
+        elif model_str.startswith(("vertex_ai/", "gemini/", "google/")):
+            keys.append((entry.get("model_name"), model_str, "(None - GCP IAM Service Account)", "GoogleAccessToken"))
+
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+    print(f"{BOLD} Apigee Encrypted KVM & Southbound Auth Provisioning Plan{RESET}")
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+    print(f"  {BOLD}Organization / Env:{RESET}  {args.organization} / {args.environment}")
+    print(f"  {BOLD}Encrypted KVM Map:{RESET}   {GREEN}{kvm_name}{RESET}  (encrypted: true)")
+    print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
+    for m_name, m_str, k_name, mode in keys:
+        env_present = "✔ set in local env" if os.environ.get(k_name) else "○ read at deploy time"
+        badge = f"[{env_present}]" if mode == "KVM Encrypted Entry" else "[Zero-Key IAM]"
+        print(f"  • {YELLOW}{m_name:<18}{RESET} ({m_str:<36}) -> {GREEN}{k_name:<20}{RESET} {DIM}{badge}{RESET}")
+    print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
+    print(f"  {BOLD}Apigee Management API Commands to Provision Encrypted KVM:{RESET}\n")
+    print(
+        f'    TOKEN="$(gcloud auth application-default print-access-token)"\n'
+        f'    curl -X POST "https://apigee.googleapis.com/v1/organizations/{args.organization}/environments/{args.environment}/keyvaluemaps" \\\n'
+        f'      -H "Authorization: Bearer ${{TOKEN}}" -H "Content-Type: application/json" \\\n'
+        f'      -d \'{{"name": "{kvm_name}", "encrypted": true}}\''
+    )
+    for _, _, k_name, mode in keys:
+        if mode == "KVM Encrypted Entry":
+            print(
+                f'\n    curl -X POST "https://apigee.googleapis.com/v1/organizations/{args.organization}/environments/{args.environment}/keyvaluemaps/{kvm_name}/entries" \\\n'
+                f'      -H "Authorization: Bearer ${{TOKEN}}" -H "Content-Type: application/json" \\\n'
+                f'      -d \'{{"name": "{k_name}", "value": "\'"${{{k_name}:-YOUR_KEY}}"\'"}}\''
+            )
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+
+
+def handle_sync_datacollectors(args):
+    """Print or provision the Apigee DataCollector resources required by `llm-token-analytics.yaml`."""
+    collectors = [
+        ("dc_llm_model", "STRING", "Actual LLM model identifier that served the response"),
+        ("dc_llm_provider", "STRING", "LLM provider (openai, vertex_ai, anthropic, bedrock, cohere, mistral, deepseek)"),
+        ("dc_llm_prompt_tokens", "INTEGER", "Standard prompt / input tokens consumed"),
+        ("dc_llm_completion_tokens", "INTEGER", "Standard completion / output tokens generated"),
+        ("dc_llm_cached_tokens", "INTEGER", "Tokens served from provider context cache or Apigee Semantic Cache"),
+        ("dc_llm_reasoning_tokens", "INTEGER", "Thinking / chain-of-thought reasoning tokens (o1/o3, Gemini 2.5, DeepSeek R1, Claude 3.7)"),
+        ("dc_llm_total_tokens", "INTEGER", "Total tokens (prompt + completion + reasoning)"),
+        ("dc_llm_cache_status", "STRING", "Cache hit classification (HIT_APIGEE_SEMANTIC_CACHE, HIT_PROVIDER_CONTEXT_CACHE, MISS)"),
+        ("dc_llm_routing_tier", "STRING", "Routing tier (SIMPLE_QA, CODING, COMPLEX_REASONING, FAILOVER_RECOVERY, DIRECT)"),
+    ]
+
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+    print(f"{BOLD} Apigee Analytics DataCollectors for LLM Token & Routing Dashboards{RESET}")
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+    print(f"  {BOLD}Organization:{RESET}  {args.organization}")
+    print(f"  {BOLD}AFT Feature:{RESET}   {GREEN}demo/llm-token-analytics.yaml{RESET} (Policy: {CYAN}DC-CollectLLMTokenAnalytics{RESET})")
+    print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
+    for name, ctype, desc in collectors:
+        print(f"  • {GREEN}{name:<26}{RESET} [{YELLOW}{ctype:<7}{RESET}]  {DIM}{desc}{RESET}")
+    print(f"{DIM}-----------------------------------------------------------------------------{RESET}")
+    print(f"  {BOLD}Apigee Management API Commands to Register DataCollectors:{RESET}\n")
+    print('    TOKEN="$(gcloud auth application-default print-access-token)"')
+    for name, ctype, desc in collectors:
+        print(
+            f'    curl -s -X POST "https://apigee.googleapis.com/v1/organizations/{args.organization}/datacollectors" \\\n'
+            f'      -H "Authorization: Bearer ${{TOKEN}}" -H "Content-Type: application/json" \\\n'
+            f'      -d \'{{"name": "{name}", "type": "{ctype}", "description": "{desc}"}}\''
+        )
+    print(f"{BOLD}{CYAN}============================================================================={RESET}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compile declarative Model Routing config files (modelrouting/*.yaml) to Apigee Feature Templates (AFT)."
@@ -748,12 +929,35 @@ def main():
     p_add.add_argument("--tpm", type=int, default=600000, help="Tokens Per Minute quota (default: 600000)")
     p_add.add_argument("--out", help="Optional output YAML path (defaults to updating config in-place)")
 
+    # sync-kvm (bridge os.environ/<KEY> references to Apigee Encrypted KVM)
+    p_kvm = subparsers.add_parser(
+        "sync-kvm",
+        help="Generate/execute Apigee Encrypted KVM provisioning for `os.environ/<KEY>` provider credentials",
+    )
+    p_kvm.add_argument("config", help="Source modelrouting/*.yaml file")
+    p_kvm.add_argument("--organization", "-o", default=os.environ.get("APIGEE_ORG", "apigee-product-demo"))
+    p_kvm.add_argument("--environment", "-e", default=os.environ.get("APIGEE_ENV", "dev-prog-proxy"))
+    p_kvm.add_argument("--kvm-name", help="Override Apigee Encrypted KVM map name")
+
+    # sync-datacollectors (register dc_llm_* DataCollectors for token breakdown dashboards)
+    p_dc = subparsers.add_parser(
+        "sync-datacollectors",
+        help="Generate/register Apigee DataCollector resources (dc_llm_*) for token breakdown dashboards",
+    )
+    p_dc.add_argument("--organization", "-o", default=os.environ.get("APIGEE_ORG", "apigee-product-demo"))
+
     args = parser.parse_args()
     root_dir = Path(__file__).resolve().parent
     demo_dir = root_dir / "demo"
 
     if args.command == "add-model":
         handle_add_model(args, demo_dir)
+        return
+    if args.command == "sync-kvm":
+        handle_sync_kvm(args)
+        return
+    if args.command == "sync-datacollectors":
+        handle_sync_datacollectors(args)
         return
 
     config_path = Path(args.config)

@@ -1,7 +1,8 @@
-# Stage 6: Semantic / Complexity Auto-Router + Enterprise Guardrails
+# Stage 6: Semantic / Complexity Auto-Router + Enterprise Guardrails, Auth & Token Analytics
 # - `auto_router/complexity_router` compiles to `llm-semantic-router.yaml`
 #   (SC-ClassifyPromptIntent via gemini-2.5-flash-lite)
-# - Combines intelligent tier routing with Semantic Cache, Model Armor, and ordered Fallbacks
+# - Combines intelligent tier routing with KVM/IAM Auth, Semantic Cache, Model Armor,
+#   ordered Fallbacks, and DataCollector Token Analytics
 
 model_list:
   - model_name: gpt-4o
@@ -74,6 +75,10 @@ router_settings:
 
 gateway_settings:
   drop_params: true
+  auth:
+    vertex_auth: google_service_account
+    provider_keys: kvm
+    kvm_name: llm-provider-credentials
   semantic_cache:
     enabled: true
     embedding_model: vertex_ai/text-embedding-005
@@ -84,3 +89,11 @@ gateway_settings:
     template_id: projects/apigee-product-demo/locations/us-central1/templates/enterprise-ai-safety
     sanitize_prompt: true
     sanitize_response: true
+  token_analytics:
+    enabled: true
+    collect_token_types:
+      - prompt_tokens
+      - completion_tokens
+      - cached_tokens
+      - reasoning_tokens
+      - total_tokens
